@@ -1,11 +1,28 @@
-.venv/
+# Local configuration and environments
 .env
-runs/
+.venv/
+
+# Python caches and test/lint output
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.DS_Store
 .coverage
+.coverage.*
 htmlcov/
+
+# Python packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Generated local runtime data and volumes
+runtime/
+runs/
+data/generated/
+postgres_data/
+
+# Operating system files
+.DS_Store
