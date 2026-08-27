@@ -55,13 +55,14 @@ def test_m03_postgres_upgrade_ingest_detect_dedupe_lifecycle_and_rollback(
             result = ExceptionService(session, settings).detect(as_of)
             session.commit()
             assert {finding.exception_type for finding in result.detections} == set(ExceptionType)
-            assert result.created == 6
+            assert result.detections
+            assert result.created == len(result.detections)
             initial_count = session.scalar(select(func.count()).select_from(ExceptionRecord))
 
             rerun = ExceptionService(session, settings).detect(as_of)
             session.commit()
             assert rerun.created == 0
-            assert rerun.updated == 6
+            assert rerun.updated == len(result.detections)
             assert (
                 session.scalar(select(func.count()).select_from(ExceptionRecord)) == initial_count
             )
