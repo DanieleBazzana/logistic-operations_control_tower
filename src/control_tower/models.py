@@ -17,13 +17,16 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
+from sqlalchemy.sql.dml import Delete, Update
 
 from control_tower.db import Base, utc_now
 from control_tower.enums import (
@@ -367,7 +370,6 @@ class ExceptionRecord(TimestampMixin, Base):
     product: Mapped[Product | None] = relationship()
     history: Mapped[list["ExceptionHistory"]] = relationship(
         back_populates="exception",
-        cascade="all, delete-orphan",
         order_by="ExceptionHistory.changed_at",
     )
 
@@ -392,7 +394,7 @@ class ExceptionHistory(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     exception_id: Mapped[int] = mapped_column(
-        ForeignKey("exceptions.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("exceptions.id", ondelete="RESTRICT"), nullable=False
     )
     from_status: Mapped[ExceptionStatus | None] = mapped_column(
         domain_enum(ExceptionStatus, "exception_status"), nullable=True
@@ -411,6 +413,48 @@ class ExceptionHistory(Base):
     __table_args__ = (
         Index("ix_exception_history_exception_changed", "exception_id", "changed_at"),
     )
+
+
+@event.listens_for(ExceptionHistory, "before_update")
+@event.listens_for(ExceptionHistory, "before_delete")
+def _prevent_exception_history_mutation(mapper, connection, target) -> None:
+    """Reject ORM updates/deletes before they can violate append-only history."""
+
+    raise ValueError("exception_history is append-only")
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _prevent_exception_history_bulk_mutation(orm_execute_state) -> None:
+    """Reject ORM UPDATE/DELETE statements against append-only history."""
+
+    if not (orm_execute_state.is_update or orm_execute_state.is_delete):
+        return
+    target = getattr(orm_execute_state.statement, "table", None)
+    if target is ExceptionHistory.__table__ or (
+        getattr(target, "name", None) == ExceptionHistory.__tablename__
+    ):
+        raise ValueError("exception_history is append-only")
+
+
+@event.listens_for(Engine, "before_execute")
+def _prevent_exception_history_legacy_bulk_mutation(
+    connection, clauseelement, multiparams, params, execution_options
+) -> None:
+    """Reject legacy ``Session.bulk_update_mappings`` history mutations.
+
+    Legacy bulk methods execute Core DML directly and therefore bypass
+    ``Session.do_orm_execute``.  The engine boundary closes that gap for all
+    SQLAlchemy UPDATE/DELETE statements; direct SQL remains protected by the
+    PostgreSQL append-only trigger.
+    """
+
+    if not isinstance(clauseelement, (Update, Delete)):
+        return
+    target = getattr(clauseelement, "table", None)
+    if target is ExceptionHistory.__table__ or (
+        getattr(target, "name", None) == ExceptionHistory.__tablename__
+    ):
+        raise ValueError("exception_history is append-only")
 
 
 # Useful descriptive aliases for service/API code without changing the table name.

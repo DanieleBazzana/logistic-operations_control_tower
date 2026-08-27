@@ -77,3 +77,21 @@ rows are skipped, conflicting rows reject the bundle; a newer inventory
 snapshot updates its product/warehouse natural key while an older snapshot is
 rejected. The command prints per-source read/accepted/rejected/inserted/
 updated/skipped/conflicted/final counts and rejection details.
+
+## M03 exception intelligence
+
+M03 evaluates the ingested operational state at an explicit, timezone-aware
+UTC `as_of` instant. The deterministic engine implements exactly six exception
+types: `SLA_BREACH_RISK`, `INVENTORY_SHORTAGE`, `STOCKOUT_RISK`,
+`INVENTORY_MISMATCH`, `SUPPLIER_DELAY`, and `SHIPMENT_DELAY`.
+
+Detection produces explainable business impact, risk metrics, root cause,
+recommended action, and confidence. The persistence service deduplicates
+active exceptions, preserves lifecycle state, and appends one immutable
+`exception_history` row for each initial detection or valid transition. The
+supported lifecycle is `OPEN` -> `ACKNOWLEDGED` -> `IN_PROGRESS` ->
+`RESOLVED`, with `DISMISSED` as an alternate terminal state.
+
+M03 is a PostgreSQL-first domain service only. APIs, authentication,
+dashboards, exports, KPI aggregation, forecasting, ML/LLM, and external
+integrations are outside this milestone.

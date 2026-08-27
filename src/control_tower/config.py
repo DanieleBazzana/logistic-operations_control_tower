@@ -5,18 +5,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Protocol
 
-from pydantic import AnyHttpUrl, Field, PostgresDsn, field_validator
+from pydantic import AnyHttpUrl, Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class _ConfigWithMainOption(Protocol):
-    def get_main_option(self, name: str) -> str | None:
-        ...
+    def get_main_option(self, name: str) -> str | None: ...
 
 
 class _ConfigWithSetMainOption(Protocol):
-    def set_main_option(self, name: str, value: str) -> None:
-        ...
+    def set_main_option(self, name: str, value: str) -> None: ...
 
 
 def resolve_database_url(
@@ -67,6 +65,37 @@ class Settings(BaseSettings):
     severity_critical_overdue_hours: int = Field(default=48, ge=0)
     severity_high_overdue_hours: int = Field(default=24, ge=0)
     severity_medium_overdue_hours: int = Field(default=4, ge=0)
+
+    @model_validator(mode="after")
+    def validate_severity_threshold_order(self) -> "Settings":
+        """Keep each severity dimension ordered from medium to critical."""
+
+        dimensions = (
+            (
+                "revenue_at_risk",
+                self.severity_medium_revenue_at_risk,
+                self.severity_high_revenue_at_risk,
+                self.severity_critical_revenue_at_risk,
+            ),
+            (
+                "orders_affected",
+                self.severity_medium_orders_affected,
+                self.severity_high_orders_affected,
+                self.severity_critical_orders_affected,
+            ),
+            (
+                "overdue_hours",
+                self.severity_medium_overdue_hours,
+                self.severity_high_overdue_hours,
+                self.severity_critical_overdue_hours,
+            ),
+        )
+        for name, medium, high, critical in dimensions:
+            if not medium <= high <= critical:
+                raise ValueError(
+                    f"severity {name} thresholds must satisfy medium <= high <= critical"
+                )
+        return self
 
     @field_validator("as_of")
     @classmethod

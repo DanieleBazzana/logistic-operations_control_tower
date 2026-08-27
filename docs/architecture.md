@@ -29,3 +29,27 @@ are part of M02. The executable workflow is:
 python -m control_tower.synthetic generate --output-dir data/generated ...
 python -m control_tower.ingestion ingest --input-dir data/generated
 ```
+
+## M03 exception intelligence
+
+M03 consumes the M02 PostgreSQL state and runs six deterministic rules at an
+explicit timezone-aware UTC `as_of` value. It detects SLA breach risk,
+inventory shortage, stockout risk, inventory mismatch, supplier delay, and
+shipment delay; no other exception types are generated. Severity is derived
+from the configured revenue, order-count, and overdue-duration thresholds.
+
+The detection contracts are immutable and carry explainable business impact,
+applicable revenue/orders-at-risk, root cause, recommended action, and
+confidence. The persistence service uses a stable issue identity and source
+fingerprint to deduplicate active findings without changing their lifecycle
+state. New findings start `OPEN` with an initial audit row. Valid lifecycle
+transitions are `OPEN` -> `ACKNOWLEDGED` -> `IN_PROGRESS` -> `RESOLVED`, or
+to `DISMISSED` from an allowed active state; terminal states cannot transition
+again. `exception_history` is append-only at both the ORM and PostgreSQL
+boundaries. SQLAlchemy UPDATE/DELETE APIs, including the legacy
+`Session.bulk_update_mappings` method, are unsupported for this table and are
+rejected before mutation.
+
+M03 does not add API endpoints, authentication, dashboards, exports, KPI
+aggregation, forecasting, ML/LLM, or external integrations. Those concerns
+remain outside this milestone.
