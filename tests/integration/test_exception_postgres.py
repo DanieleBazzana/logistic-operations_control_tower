@@ -22,6 +22,7 @@ from control_tower.synthetic.generator import generate
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("reset_disposable_postgres_database")
 def test_m03_postgres_upgrade_ingest_detect_dedupe_lifecycle_and_rollback(
     tmp_path: Path,
 ) -> None:

@@ -13,6 +13,7 @@ from control_tower.synthetic.generator import generate
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("reset_disposable_postgres_database")
 def test_generated_bundle_ingests_idempotently_in_postgres(tmp_path: Path) -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:

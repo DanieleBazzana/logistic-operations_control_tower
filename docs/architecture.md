@@ -50,6 +50,47 @@ boundaries. SQLAlchemy UPDATE/DELETE APIs, including the legacy
 `Session.bulk_update_mappings` method, are unsupported for this table and are
 rejected before mutation.
 
-M03 does not add API endpoints, authentication, dashboards, exports, KPI
-aggregation, forecasting, ML/LLM, or external integrations. Those concerns
-remain outside this milestone.
+M03 does not add authentication, dashboards, exports, KPI aggregation,
+forecasting, ML/LLM, or external integrations. Those concerns remain outside
+that milestone.
+
+## M04 read API and KPI flow
+
+The FastAPI application is a read-oriented adapter over the M01/M02/M03
+PostgreSQL state. `api/dependencies.py` supplies one SQLAlchemy session per
+request; `api/queries.py` applies exact filters, inclusive timestamp bounds,
+stable ordering, and pagination before `api/routes.py` maps rows to the
+versioned `/api/v1` contracts. Collection pages are available for orders,
+inventory, purchase orders, shipments, and exceptions. Order details eager-load
+order items (product source ID/SKU, ordered and fulfilled quantities, unit
+price) and shipment summaries. Exception details eager-load append-only history,
+ordered by `(changed_at, id)`.
+
+The only write route is `PATCH /exceptions/{exception_id}/status`. It delegates
+to the M03 lifecycle service, trims actor/reason values, returns 422 for request
+validation, 409 for illegal transitions, and rolls back failed transitions.
+There is deliberately no migration, source-data mutation, ingestion, or
+detection endpoint in M04.
+
+`GET /kpis/summary` accepts an optional timezone-aware `as_of`; omission uses
+`Settings.as_of`. The effective instant is normalized to UTC and echoed in the
+response. All order and exception predicates are bounded by that instant. The
+charter fields are:
+
+| Field | Definition |
+| --- | --- |
+| `orders_processed` | Orders ordered at or before `as_of` |
+| `open_orders` | Point-in-time-bounded orders whose current status is `OPEN` |
+| `fulfilled_orders` | Bounded orders currently `FULFILLED` and fulfilled by `as_of` |
+| `cancelled_orders` | Bounded orders currently `CANCELLED` |
+| `sla_performance_pct` | On-time fulfilled orders / fulfilled orders × 100; `null` with no denominator |
+| `open_exceptions` | Active (`OPEN`, `ACKNOWLEDGED`, `IN_PROGRESS`) findings detected by `as_of` |
+| `critical_exceptions` | Active, bounded findings with critical severity |
+| `revenue_at_risk` | Finding-level sum for active, bounded findings |
+| `stockout_risks`, `supplier_delays`, `shipment_delays` | Counts of the corresponding active, bounded finding types |
+
+KPI aggregation is read-only and never runs detection. Revenue is intentionally
+not a distinct-order financial total. The API has no authentication/RBAC,
+dashboard, export, forecasting, or external integration; it assumes the
+database has already been migrated, ingested, and (when required) detected by
+the M02/M03 workflows. PostgreSQL is the supported runtime database.

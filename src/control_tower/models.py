@@ -265,6 +265,15 @@ class PurchaseOrder(TimestampMixin, Base):
         back_populates="purchase_order", cascade="all, delete-orphan"
     )
 
+    @property
+    def remaining_quantity(self) -> Decimal:
+        """Return the quantity still outstanding across all PO lines."""
+
+        return sum(
+            (item.ordered_quantity - item.received_quantity for item in self.items),
+            Decimal("0"),
+        )
+
     __table_args__ = (
         CheckConstraint(
             "received_at IS NULL OR received_at >= ordered_at",
@@ -370,7 +379,7 @@ class ExceptionRecord(TimestampMixin, Base):
     product: Mapped[Product | None] = relationship()
     history: Mapped[list["ExceptionHistory"]] = relationship(
         back_populates="exception",
-        order_by="ExceptionHistory.changed_at",
+        order_by=lambda: (ExceptionHistory.changed_at, ExceptionHistory.id),
     )
 
     __table_args__ = (
