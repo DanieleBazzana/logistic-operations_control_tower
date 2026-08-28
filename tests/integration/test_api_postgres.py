@@ -155,6 +155,60 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                 )
                 or 0
             )
+            expected_stockout = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ExceptionRecord)
+                    .where(
+                        ExceptionRecord.detected_at <= AS_OF,
+                        ExceptionRecord.status.in_(
+                            (
+                                ExceptionStatus.OPEN,
+                                ExceptionStatus.ACKNOWLEDGED,
+                                ExceptionStatus.IN_PROGRESS,
+                            )
+                        ),
+                        ExceptionRecord.exception_type == ExceptionType.STOCKOUT_RISK,
+                    )
+                )
+                or 0
+            )
+            expected_supplier_delays = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ExceptionRecord)
+                    .where(
+                        ExceptionRecord.detected_at <= AS_OF,
+                        ExceptionRecord.status.in_(
+                            (
+                                ExceptionStatus.OPEN,
+                                ExceptionStatus.ACKNOWLEDGED,
+                                ExceptionStatus.IN_PROGRESS,
+                            )
+                        ),
+                        ExceptionRecord.exception_type == ExceptionType.SUPPLIER_DELAY,
+                    )
+                )
+                or 0
+            )
+            expected_shipment_delays = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(ExceptionRecord)
+                    .where(
+                        ExceptionRecord.detected_at <= AS_OF,
+                        ExceptionRecord.status.in_(
+                            (
+                                ExceptionStatus.OPEN,
+                                ExceptionStatus.ACKNOWLEDGED,
+                                ExceptionStatus.IN_PROGRESS,
+                            )
+                        ),
+                        ExceptionRecord.exception_type == ExceptionType.SHIPMENT_DELAY,
+                    )
+                )
+                or 0
+            )
             expected_revenue = (
                 session.scalar(
                     select(func.coalesce(func.sum(ExceptionRecord.revenue_at_risk), 0)).where(
@@ -242,6 +296,9 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
         assert body["open_exceptions"] == expected_open_exceptions
         assert body["critical_exceptions"] == expected_critical
         assert body["revenue_at_risk"] == f"{Decimal(expected_revenue):.2f}"
+        assert body["stockout_risks"] == expected_stockout
+        assert body["supplier_delays"] == expected_supplier_delays
+        assert body["shipment_delays"] == expected_shipment_delays
         assert acknowledged.status_code == in_progress.status_code == resolved.status_code == 200
         assert acknowledged.json()["history"] is not None
         assert invalid.status_code == 409

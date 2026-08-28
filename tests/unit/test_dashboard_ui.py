@@ -30,6 +30,7 @@ EXCEPTION = {
 class FakeClient:
     def __init__(self):
         self.updated = []
+        self.status = "OPEN"
 
     def summary(self, **kwargs):
         return {
@@ -54,13 +55,14 @@ class FakeClient:
         return [EXCEPTION]
 
     def get_exception(self, exception_id):
-        return EXCEPTION
+        return {**EXCEPTION, "status": self.status}
 
     def list_purchase_orders(self, **kwargs):
         return {"items": [], "page": 1, "page_size": 25, "total": 0}
 
     def update_exception_status(self, exception_id, status, *, actor, reason=None):
         self.updated.append((exception_id, status, actor, reason))
+        self.status = status
         return {**EXCEPTION, "status": status}
 
 
@@ -121,3 +123,53 @@ def test_dashboard_renders_kpis_queue_and_supplier_context_with_fake_client():
     assert any(item == "SLA_BREACH_RISK" for item in test_app.dataframe[0].value["exception_type"])
     assert any("Exception Queue" in item.value for item in test_app.header)
     assert any("**Operational status:** OPEN" in item.value for item in test_app.markdown)
+
+
+def _run_exception_detail(client):
+    import streamlit as st
+
+    from control_tower.dashboard.ui import render_exception_detail
+
+    st.session_state.setdefault("_dashboard_cache", {"stale": True})
+    render_exception_detail(client, 1)
+
+
+def test_dashboard_submits_successful_lifecycle_form_and_invalidates_cache(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("control_tower.dashboard.ui.st.rerun", lambda: None)
+    test_app = AppTest.from_function(_run_exception_detail, args=(client,)).run()
+
+    test_app.text_input[0].set_value("operator")
+    test_app.text_area[0].set_value("triaged by operations")
+    test_app.button[0].click().run()
+
+    assert client.updated == [(1, "ACKNOWLEDGED", "operator", "triaged by operations")]
+    assert any("Exception status updated." in item.value for item in test_app.success)
+    assert test_app.session_state["_dashboard_data_version"] == 1
+    assert "_dashboard_cache" not in test_app.session_state
+
+
+def test_dashboard_rejects_blank_actor_before_calling_api(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("control_tower.dashboard.ui.st.rerun", lambda: None)
+    test_app = AppTest.from_function(_run_exception_detail, args=(client,)).run()
+
+    test_app.button[0].click().run()
+
+    assert client.updated == []
+    assert any("Actor is required." in item.value for item in test_app.error)
+
+
+def test_dashboard_rejects_blank_terminal_reason_before_calling_api(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("control_tower.dashboard.ui.st.rerun", lambda: None)
+    test_app = AppTest.from_function(_run_exception_detail, args=(client,)).run()
+
+    test_app.selectbox[0].set_value("DISMISSED")
+    test_app.text_input[0].set_value("operator")
+    test_app.button[0].click().run()
+
+    assert client.updated == []
+    assert any(
+        "A reason is required for terminal statuses." in item.value for item in test_app.error
+    )

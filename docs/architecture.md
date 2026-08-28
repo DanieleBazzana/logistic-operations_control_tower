@@ -1,134 +1,165 @@
-# M02 architecture
+# M01-M06 architecture
 
-M02 is a deterministic fixture-and-load boundary around the M01 relational
-model.
+## System purpose
 
-1. **Synthetic boundary** — `control_tower.synthetic.generator` uses a local
-   `random.Random(seed)` and explicit UTC `as_of` to create coherent OMS, WMS,
-   ERP, and carrier rows. `artifacts.py` writes stable sorted UTF-8 CSVs and a
-   content-derived manifest identity. `anomalies.py` only labels six ordinary
-   source-data fixtures for future M03 detection; it never creates exceptions.
-2. **Validation boundary** — `control_tower.ingestion.readers` reads and
-   identity-checks a bundle. `normalization.py` canonicalizes strings, enums,
-   UTC timestamps, booleans, and Decimal values. `validation.py` validates
-   schema, bounds, time ordering, joins, duplicate source IDs, and inventory
-   snapshot natural keys without touching the database.
-3. **Persistence boundary** — `loader.py` requires a PostgreSQL SQLAlchemy
-   engine, performs all validation and existing-row conflict checks before
-   writes, then uses one outer transaction in dependency order. Existing
-   source IDs are idempotent; inventory uses `(product, warehouse)` plus
-   `observed_at` freshness. Any database error rolls back the transaction.
-4. **Reporting boundary** — typed contracts and `summary.py` expose per-source
-   counts and structured rejection details, with manifest identity, seed, and
-   `as_of` for reproducibility.
+The Supply Chain Operations Control Tower consolidates deterministic synthetic
+OMS, WMS, ERP/procurement, and carrier data, identifies six explainable operational
+exceptions, exposes a stable API, and presents an operator dashboard. PostgreSQL is
+the runtime system of record; generated source artifacts and migrations are explicit
+inputs to the flow.
 
-No exception detection, severity, lifecycle, dashboards, or new schema tables
-are part of M02. The executable workflow is:
+## End-to-end flow
 
 ```text
-python -m control_tower.synthetic generate --output-dir data/generated ...
-python -m control_tower.ingestion ingest --input-dir data/generated
+seed + timezone-aware as_of
+        |
+        v
+Synthetic generator --> stable CSV bundle + manifest
+        |
+        v
+Validation/normalization --> atomic PostgreSQL ingestion
+        |
+        v
+M03 rules at explicit as_of --> exception records + immutable history
+        |
+        +--> FastAPI /api/v1 --> API clients and Streamlit dashboard
+        |
+        +--> KPI read service (query-only, point-in-time bounded)
+
+PATCH exception status --> M03 lifecycle service --> exception_history
 ```
 
-## M03 exception intelligence
+The release path is intentionally operational rather than hidden inside application
+startup: migrate to the current Alembic `head`, generate, ingest, detect, then use
+the API and dashboard. There is no HTTP ingestion or detection endpoint.
 
-M03 consumes the M02 PostgreSQL state and runs six deterministic rules at an
-explicit timezone-aware UTC `as_of` value. It detects SLA breach risk,
-inventory shortage, stockout risk, inventory mismatch, supplier delay, and
-shipment delay; no other exception types are generated. Severity is derived
-from the configured revenue, order-count, and overdue-duration thresholds.
-
-The detection contracts are immutable and carry explainable business impact,
-applicable revenue/orders-at-risk, root cause, recommended action, and
-confidence. The persistence service uses a stable issue identity and source
-fingerprint to deduplicate active findings without changing their lifecycle
-state. New findings start `OPEN` with an initial audit row. Valid lifecycle
-transitions are `OPEN` -> `ACKNOWLEDGED` -> `IN_PROGRESS` -> `RESOLVED`, or
-to `DISMISSED` from an allowed active state; terminal states cannot transition
-again. `exception_history` is append-only at both the ORM and PostgreSQL
-boundaries. SQLAlchemy UPDATE/DELETE APIs, including the legacy
-`Session.bulk_update_mappings` method, are unsupported for this table and are
-rejected before mutation.
-
-M03 does not add authentication, dashboards, exports, KPI aggregation,
-forecasting, ML/LLM, or external integrations. Those concerns remain outside
-that milestone.
-
-## M04 read API and KPI flow
-
-The FastAPI application is a read-oriented adapter over the M01/M02/M03
-PostgreSQL state. `api/dependencies.py` supplies one SQLAlchemy session per
-request; `api/queries.py` applies exact filters, inclusive timestamp bounds,
-stable ordering, and pagination before `api/routes.py` maps rows to the
-versioned `/api/v1` contracts. Collection pages are available for orders,
-inventory, purchase orders, shipments, and exceptions. Order details eager-load
-order items (product source ID/SKU, ordered and fulfilled quantities, unit
-price) and shipment summaries. Exception details eager-load append-only history,
-ordered by `(changed_at, id)`.
-
-The only write route is `PATCH /exceptions/{exception_id}/status`. It delegates
-to the M03 lifecycle service, trims actor/reason values, returns 422 for request
-validation, 409 for illegal transitions, and rolls back failed transitions.
-There is deliberately no migration, source-data mutation, ingestion, or
-detection endpoint in M04.
-
-`GET /kpis/summary` accepts an optional timezone-aware `as_of`; omission uses
-`Settings.as_of`. The effective instant is normalized to UTC and echoed in the
-response. All order and exception predicates are bounded by that instant. The
-charter fields are:
-
-| Field | Definition |
-| --- | --- |
-| `orders_processed` | Orders ordered at or before `as_of` |
-| `open_orders` | Point-in-time-bounded orders whose current status is `OPEN` |
-| `fulfilled_orders` | Bounded orders currently `FULFILLED` and fulfilled by `as_of` |
-| `cancelled_orders` | Bounded orders currently `CANCELLED` |
-| `sla_performance_pct` | On-time fulfilled orders / fulfilled orders × 100; `null` with no denominator |
-| `open_exceptions` | Active (`OPEN`, `ACKNOWLEDGED`, `IN_PROGRESS`) findings detected by `as_of` |
-| `critical_exceptions` | Active, bounded findings with critical severity |
-| `revenue_at_risk` | Finding-level sum for active, bounded findings |
-| `stockout_risks`, `supplier_delays`, `shipment_delays` | Counts of the corresponding active, bounded finding types |
-
-KPI aggregation is read-only and never runs detection. Revenue is intentionally
-not a distinct-order financial total. The API has no authentication/RBAC,
-dashboard, export, forecasting, or external integration; it assumes the
-database has already been migrated, ingested, and (when required) detected by
-the M02/M03 workflows. PostgreSQL is the supported runtime database.
-
-## M05 Streamlit operations control tower
-
-M05 adds a thin presentation adapter rather than a second data layer:
-
-1. **API client boundary** — `control_tower.dashboard.client.DashboardClient`
-   uses a bounded-timeout `httpx` client against `API_BASE_URL` (defaulting to
-   `http://127.0.0.1:8000/api/v1`). It serializes repeated query parameters,
-   timezone-aware timestamps, and Decimal values without converting money or
-   quantities to floats. HTTP, timeout, and transport failures become safe
-   user-facing errors without exposing response bodies, SQL, hosts, or
-   credentials. Collection helpers follow M04 pagination to retrieve every
-   filtered row for CSV export.
-2. **Data-driven UI boundary** — `dashboard/ui.py` renders the eight Charter
-   KPIs, paginated Exception Queue, explicit loading/error/empty states, and
-   exception detail/history. The client is injected into `render_dashboard`,
-   which keeps the view testable with Streamlit AppTest and a fake client. UI
-   values remain JSON strings so M04's money/quantity precision is preserved.
-3. **Controlled operational write** — the detail form sends actor, target
-   status, and reason only to `PATCH /exceptions/{id}/status`. The M04 lifecycle
-   service remains authoritative for legal transitions and terminal-reason
-   validation. Successful mutation increments the session data version and
-   clears the dashboard cache before rerendering.
-4. **Supplier context and export** — a supplier ID is used only for a
-   `/purchase-orders?supplier_id=...` context query; it is never added as a
-   fabricated generic-exception filter. The queue CSV uses all pages returned
-   by the API, not merely the current visible page.
-
-Run the local MVP with the API and PostgreSQL already prepared:
+## Runtime topology
 
 ```text
-.venv/bin/python -m uvicorn control_tower.api.app:app --reload
-.venv/bin/python -m streamlit run src/control_tower/dashboard/app.py
+Docker Compose project
+└── PostgreSQL 16 (loopback port, disposable release volume)
+
+Native Python processes
+├── Alembic migration CLI
+├── synthetic generator CLI
+├── ingestion CLI
+├── exception detection CLI
+├── Uvicorn/FastAPI process
+└── Streamlit process (HTTP-only client of FastAPI)
 ```
 
-There is no direct database access, authentication/RBAC, ingestion/detection
-control, forecasting, or Excel export in M05. The dashboard assumes the M04
-API's read contracts and PostgreSQL-backed operational state are available.
+`DATABASE_URL` identifies the runtime database. `TEST_DATABASE_URL` is a separate,
+explicitly disposable integration/release target. The release script creates an
+isolated Compose project and volume, validates the parsed test URL, waits for
+PostgreSQL health, and removes only that project on exit.
+
+## Architectural boundaries
+
+### M01 relational foundation
+
+SQLAlchemy models define products, warehouses, suppliers, orders and items,
+inventory and movements, purchase orders and items, shipments, exceptions, and
+append-only exception history. Alembic owns schema evolution. Application startup
+creates an engine but does not create tables.
+
+### M02 synthetic and ingestion boundary
+
+`control_tower.synthetic.generator` uses one local `random.Random(seed)` and an
+explicit UTC `as_of`; `artifacts.py` writes stable sorted UTF-8 CSVs and a
+content-derived manifest identity. `anomalies.py` labels six ordinary source-data
+scenarios; it does not write exception rows.
+
+`ingestion.readers` reads the bundle, `normalization.py` canonicalizes values, and
+`validation.py` checks schema, bounds, joins, duplicate IDs, time ordering, manifest
+counts, and inventory snapshot freshness without database writes. `loader.py` then
+performs conflict preflight and one dependency-ordered PostgreSQL transaction.
+Identical source IDs are skipped; conflicting source IDs, stale snapshots, and
+equal-time inventory conflicts are rejected.
+
+### M03 exception intelligence boundary
+
+The six deterministic rules evaluate persisted operational state at an explicit,
+timezone-aware instant:
+
+- `SLA_BREACH_RISK`
+- `INVENTORY_SHORTAGE`
+- `STOCKOUT_RISK`
+- `INVENTORY_MISMATCH`
+- `SUPPLIER_DELAY`
+- `SHIPMENT_DELAY`
+
+Immutable detection contracts carry issue identity, source fingerprint, business
+impact, risk metrics, root cause, recommended action, confidence, and relationships.
+`ExceptionService` resolves active findings by domain identity, refreshes derived
+facts on rerun, and uses fingerprint suppression for historical resolved/dismissed
+findings. New findings start `OPEN` and receive one initial history row.
+
+The lifecycle service is the sole status-transition authority:
+
+```text
+OPEN -> ACKNOWLEDGED -> IN_PROGRESS -> RESOLVED
+  |          |              |
+  +----------+--------------+--> DISMISSED
+```
+
+Terminal states cannot transition. Actor is required for every transition and a
+nonblank reason is required for `RESOLVED` and `DISMISSED`. History is append-only
+through ORM and PostgreSQL protections, including bulk statement boundaries and
+truncate protection.
+
+The detection CLI (`python -m control_tower.exceptions`) requires `--as-of`, accepts
+an optional `--database-url`, normalizes the instant to UTC, commits one detection
+run, and prints only JSON counters.
+
+### M04 API and KPI boundary
+
+FastAPI dependencies create one SQLAlchemy session per request. Query functions own
+stable ordering, exact filters, inclusive time bounds, pagination, eager loading,
+and point-in-time predicates. Routes map those results to `/api/v1` contracts.
+Operational resources use source identifiers; exception resources use numeric IDs.
+The only write route is `PATCH /exceptions/{id}/status`, which delegates to M03 and
+maps validation to 422, missing records to 404, illegal transitions to 409, and
+PostgreSQL failures to safe 503 responses.
+
+`GET /kpis/summary` is query-only. It accepts an optional timezone-aware `as_of`,
+defaults from settings, echoes normalized UTC, and returns bounded order and active
+exception aggregates. The dashboard KPI fields are orders processed, SLA
+performance, open exceptions, critical exceptions, revenue at risk, stockout risks,
+supplier delays, and shipment delays. Revenue at risk is a finding-level sum, not a
+distinct-order financial total.
+
+### M05 dashboard boundary
+
+`DashboardClient` is a bounded-timeout HTTPX client with safe error mapping and
+pagination-aware export. `dashboard.ui` is a Streamlit presentation adapter that
+receives an injectable client for AppTest coverage. It renders the eight KPIs,
+filtered/paginated Exception Queue, all-page CSV export, supplier purchase-order
+context, exception detail/history, and explicit loading/error/empty states.
+
+The dashboard does not import SQLAlchemy models or open a database connection. Its
+lifecycle form sends actor, target status, and reason to the API; successful writes
+increment a session data version, clear cached reads, and rerender.
+
+### M06 release boundary
+
+`TEST_DATABASE_URL` and `ALLOW_DESTRUCTIVE_TEST_DB=1` are required for destructive
+integration reset. The target must be PostgreSQL, query-free, loopback-only, and
+named `control_tower_m04` or ending in `_test`; the Compose password must match the
+URL password. `scripts/verify_release.sh` exercises migration, deterministic
+artifact comparison, ingest/re-ingest, detection/deduplication, API health/KPI/
+queue/detail/lifecycle smoke, and the PostgreSQL integration suite. Temporary logs
+are not retained and credentials are never printed.
+
+## Out of scope
+
+The current architecture deliberately excludes:
+
+- authentication, authorization/RBAC, tenant isolation, and production secrets;
+- production OMS/WMS/ERP/carrier connectors, scheduling, queues, and webhooks;
+- ingestion or detection HTTP mutation endpoints;
+- forecasting, ML/LLM enrichment, notification routing, and autonomous remediation;
+- production observability, HA/scaling, cloud deployment, and disaster recovery;
+- dashboard direct database access, Excel export, and multi-user collaboration.
+
+These are future product or platform boundaries, not implicit behavior of the M01-M06
+release.
