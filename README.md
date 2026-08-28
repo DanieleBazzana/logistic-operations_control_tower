@@ -229,3 +229,7 @@ Focused unit tests:
 The complete suite without a PostgreSQL URL skips PostgreSQL integration tests by
 design. For authoritative integration evidence, use the canonical release command above
 with an isolated `TEST_DATABASE_URL` and `ALLOW_DESTRUCTIVE_TEST_DB=1`.
+
+## License
+
+[MIT License](LICENSE)

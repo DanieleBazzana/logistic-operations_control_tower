@@ -144,7 +144,15 @@ run the following checks and retain their real output in the review record:
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
-.venv/bin/python -m compileall -q src tests
+.venv/bin/python - <<'PY'
+import ast
+import subprocess
+
+for path in subprocess.check_output(["git", "ls-files", "-z", "--", "*.py"]).decode().split(chr(0)):
+    if path:
+        with open(path, encoding="utf-8") as source:
+            ast.parse(source.read(), filename=path)
+PY
 bash -n scripts/verify_release.sh
 ./scripts/verify_release.sh
 ```
