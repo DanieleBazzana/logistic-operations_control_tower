@@ -94,3 +94,41 @@ not a distinct-order financial total. The API has no authentication/RBAC,
 dashboard, export, forecasting, or external integration; it assumes the
 database has already been migrated, ingested, and (when required) detected by
 the M02/M03 workflows. PostgreSQL is the supported runtime database.
+
+## M05 Streamlit operations control tower
+
+M05 adds a thin presentation adapter rather than a second data layer:
+
+1. **API client boundary** — `control_tower.dashboard.client.DashboardClient`
+   uses a bounded-timeout `httpx` client against `API_BASE_URL` (defaulting to
+   `http://127.0.0.1:8000/api/v1`). It serializes repeated query parameters,
+   timezone-aware timestamps, and Decimal values without converting money or
+   quantities to floats. HTTP, timeout, and transport failures become safe
+   user-facing errors without exposing response bodies, SQL, hosts, or
+   credentials. Collection helpers follow M04 pagination to retrieve every
+   filtered row for CSV export.
+2. **Data-driven UI boundary** — `dashboard/ui.py` renders the eight Charter
+   KPIs, paginated Exception Queue, explicit loading/error/empty states, and
+   exception detail/history. The client is injected into `render_dashboard`,
+   which keeps the view testable with Streamlit AppTest and a fake client. UI
+   values remain JSON strings so M04's money/quantity precision is preserved.
+3. **Controlled operational write** — the detail form sends actor, target
+   status, and reason only to `PATCH /exceptions/{id}/status`. The M04 lifecycle
+   service remains authoritative for legal transitions and terminal-reason
+   validation. Successful mutation increments the session data version and
+   clears the dashboard cache before rerendering.
+4. **Supplier context and export** — a supplier ID is used only for a
+   `/purchase-orders?supplier_id=...` context query; it is never added as a
+   fabricated generic-exception filter. The queue CSV uses all pages returned
+   by the API, not merely the current visible page.
+
+Run the local MVP with the API and PostgreSQL already prepared:
+
+```text
+.venv/bin/python -m uvicorn control_tower.api.app:app --reload
+.venv/bin/python -m streamlit run src/control_tower/dashboard/app.py
+```
+
+There is no direct database access, authentication/RBAC, ingestion/detection
+control, forecasting, or Excel export in M05. The dashboard assumes the M04
+API's read contracts and PostgreSQL-backed operational state are available.

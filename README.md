@@ -164,4 +164,38 @@ is echoed in the response. It returns `orders_processed`, `open_orders`,
 that instant. Revenue at risk is a finding-level sum across active exception
 findings; the same order may therefore contribute to more than one finding and
 the value is not a distinct-order financial total. Authentication/RBAC, operational mutations,
-ingestion/detection endpoints, dashboard, and export remain outside M04.
+ingestion/detection endpoints, and dashboard/export were outside M04. M05 adds
+only the local Streamlit read surface and the controlled exception lifecycle UI.
+
+## M05 Operations dashboard
+
+Start the dashboard in a second terminal after the M04 API is running:
+
+```bash
+API_BASE_URL=http://127.0.0.1:8000/api/v1 \
+  .venv/bin/python -m streamlit run src/control_tower/dashboard/app.py
+```
+
+`API_BASE_URL` defaults to `http://127.0.0.1:8000/api/v1`. The dashboard uses
+only the versioned FastAPI boundary; it never opens a PostgreSQL connection or
+imports the database models. It presents all eight Charter KPIs (orders
+processed, SLA performance, open and critical exceptions, revenue at risk,
+stockout risks, supplier delays, and shipment delays), plus an Exception Queue
+with type, severity, status, entity, business impact, revenue at risk, detected
+time, and recommended action.
+
+Queue filters cover exception type, severity, lifecycle status, warehouse, and
+entity type/ID. Supplier context is deliberately separate: entering a supplier
+ID queries `/purchase-orders?supplier_id=...` and does not pretend that generic
+exceptions support supplier filtering. The queue is paginated through the API;
+the CSV download requests every matching page, not only the visible page. An
+exception detail view shows business impact, revenue at risk, affected orders,
+root cause, recommended action, confidence, and immutable lifecycle history.
+Status changes send the required actor and terminal reason to the M04 lifecycle
+route, so the API remains authoritative for legal transitions.
+
+The dashboard has explicit loading/error/empty states and keeps API values as
+strings, preserving M04 money and quantity precision. Session-scoped read data
+is invalidated after a successful lifecycle mutation. This is a local MVP: it
+has no authentication/RBAC, direct database access, ingestion/detection
+controls, or Excel export.
