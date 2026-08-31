@@ -12,13 +12,16 @@ data in PostgreSQL. Deterministic exception rules identify six actionable condit
 with explainability, severity, revenue/order impact, root cause, and recommended
 action. A versioned FastAPI API provides the operational read surface and controlled
 exception lifecycle; a Streamlit dashboard presents the same contracts to users.
-The complete release flow is reproducible locally and is backed by disposable
-PostgreSQL verification.
+The public read-only demo uses the existing Cloud Run deployment boundary and Neon
+PostgreSQL. The complete release flow is also reproducible locally and is backed by
+disposable PostgreSQL verification; this repository does not provision or contain
+cloud credentials.
 
 ## Stack
 
 - Python 3.11+
-- PostgreSQL 16 via Docker Compose (application processes run natively)
+- PostgreSQL 16 via Docker Compose for local verification; Neon PostgreSQL for the
+  existing deployed runtime
 - SQLAlchemy 2, Alembic, and psycopg
 - FastAPI and Uvicorn
 - Streamlit, Pandas, and HTTPX
@@ -174,9 +177,11 @@ The dashboard renders all eight KPIs, a paginated/filterable Exception Queue,
 CSV export of all matching pages, supplier purchase-order context, exception detail,
 immutable lifecycle history, and the controlled lifecycle form. It uses only the
 FastAPI boundary and invalidates session-scoped read data after a successful status
-mutation. This is a local MVP with no authentication/RBAC, direct database access,
-forecasting, external integrations, ingestion controls, detection controls, or
-Excel export.
+mutation. The public demo is read-only: it exposes the existing GET/API and dashboard
+read surface and does not permit lifecycle mutations. Local development can enable
+the controlled lifecycle form. There is no authentication/RBAC, direct database access
+from the dashboard, forecasting, external connector framework, ingestion controls,
+detection controls, or Excel export.
 
 ## Canonical release verification
 
@@ -214,26 +219,33 @@ are removed during cleanup.
   connector framework; future work could add authenticated OMS/WMS/ERP/carrier
   adapters and incremental ingestion scheduling.
 - Authentication, authorization/RBAC, multi-tenant isolation, and audit access
-  controls are intentionally out of scope for this local portfolio release.
+  controls are intentionally out of scope for the current public product.
 - Detection is rule-based and synchronous; future releases could add scheduling,
   richer prioritization, notification routing, and explainable forecasting while
   keeping the deterministic rule contracts.
-- The dashboard is a local Streamlit presentation layer; production deployment
-  would need identity, observability, scaling, and a stronger UI/API delivery model.
+- The existing public deployment is intentionally read-only and anonymous; identity,
+  authorization/RBAC, multi-tenant isolation, and production-grade observability are
+  not provided by this repository.
 - The release script assumes Docker, Docker Compose, `curl`, a repository `.venv`,
   and an available local API port (8000 by default; override with `API_PORT`).
 - Docker base images remain tag-pinned rather than digest-pinned, and Python
   dependencies are not yet committed to a lockfile. Reproducible digest/lockfile
-  hardening is an optional, non-blocking follow-up to this local M07 gate.
+  hardening is an optional, non-blocking follow-up to this local release gate.
 
-## M07 production-like local deployment
+## Current deployment and operations
 
-M07 keeps production operations explicit and reversible while remaining local-only.
-The API and Streamlit dashboard have independent non-root images, bind only to
-configured ports, honor the provider-style `PORT` variable, and start without
-reload or debug mode. Application images contain no generated data or runtime
-filesystem state. `migrate` and `bootstrap` are separate one-shot Compose jobs;
-neither schema migration nor demo generation runs during web application startup.
+The current product boundary is an existing Cloud Run deployment for the FastAPI API
+and Streamlit dashboard, backed by Neon PostgreSQL. The public demo sets
+`PUBLIC_DEMO_READ_ONLY=true`; no lifecycle write is available there. Deployment
+configuration, service URLs, IAM, secrets, and Neon connection details are external
+to this repository and are not asserted here.
+
+The local equivalent keeps production operations explicit and reversible. The API and
+Streamlit dashboard have independent non-root images, bind only to configured ports,
+honor the provider-style `PORT` variable, and start without reload or debug mode.
+Application images contain no generated data or runtime filesystem state. `migrate`
+and `bootstrap` are separate one-shot Compose jobs; neither schema migration nor demo
+generation runs during web application startup.
 
 ```bash
 export POSTGRES_PASSWORD=synthetic-local-password
@@ -253,7 +265,7 @@ service; the dashboard also omits its lifecycle form. Local development defaults
 to `false`, so existing controlled lifecycle behavior remains available. Anonymous
 read access is intentionally limited to the existing dashboard/KPI/queue/detail
 and operational GET routes; authentication, SSO, and enterprise RBAC are not
-introduced by M07.
+provided by the current product.
 
 The liveness endpoint (`/api/v1/livez`) is process-only. Readiness (`/api/v1/readyz`)
 and the compatibility health endpoint (`/api/v1/health`) execute a lightweight
@@ -284,7 +296,7 @@ volume, check out the reviewed prior image or source revision, run only migratio
 approved for that revision (downgrade only when the migration is explicitly
 reversible), then restart the independent services. Do not run destructive bootstrap
 as an application health hook. See [docs/operations.md](docs/operations.md) for the
-runbook and the future Cloud Run/Neon boundary.
+runbook and the current Cloud Run/Neon boundary.
 
 ## Verification shortcuts
 

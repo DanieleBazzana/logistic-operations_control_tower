@@ -2,20 +2,23 @@
 
 ## Service boundaries
 
-The local production-like topology is five services: PostgreSQL, an explicit
+The current public product is an existing Cloud Run deployment of the FastAPI API
+and Streamlit dashboard backed by Neon PostgreSQL. Its demo configuration is
+read-only through `PUBLIC_DEMO_READ_ONLY=true`; deployment URLs, IAM, secrets, and
+Neon connection details are maintained outside this repository.
+
+The local verification topology is five services: PostgreSQL, an explicit
 `migrate` job, an explicit `bootstrap` job, FastAPI, and Streamlit. Only PostgreSQL
 has a persistent volume. FastAPI and Streamlit are independent, non-root images;
 application startup does not create schema, generate data, ingest, or detect.
 
-The future deployment shape is the same boundary on separate Google Cloud Run
-services with `min instances=0` and Neon PostgreSQL. Cloud/provider configuration,
-credentials, IAM, and provisioning are deliberately not included in this local
-milestone. Alembic remains a deployment job and deterministic bootstrap remains a
-separate operator-approved step.
+Cloud Run and Neon provider configuration, credentials, IAM, and provisioning are
+deliberately not included here. Alembic remains a deployment job and deterministic
+bootstrap remains a separate operator-approved step.
 
-## Cost guardrails before any cloud deployment
+## Cost guardrails before changing cloud resources
 
-Treat cloud deployment as an operator-owned billing decision, not as a promise of
+Treat cloud changes as an operator-owned billing decision, not as a promise of
 free hosting. Cloud Run requires a billing-enabled Google Cloud project; the intended
 baseline is `min instances=0` for scale-to-zero, but request compute, logs, network
 traffic/egress, and related services may still be billable. Neon Free is only an
@@ -72,14 +75,23 @@ docker compose logs --tail=100 api dashboard
 
 ## Public demo safety boundary
 
-Set `PUBLIC_DEMO_READ_ONLY=true` for the API and dashboard services. FastAPI is
+The existing public demo sets `PUBLIC_DEMO_READ_ONLY=true` for the API and dashboard
+services. FastAPI is
 the authoritative server-side boundary: every lifecycle PATCH is rejected with
 403 before the lifecycle service is called. The dashboard independently hides the
 lifecycle form. GET dashboard, KPI, queue, detail, and operational endpoints remain
-available anonymously. This flag is not authentication or RBAC.
+available anonymously. This flag is not authentication or RBAC. A local development
+stack may keep the flag `false` when controlled lifecycle transitions are being
+exercised.
 
-Keep the flag `false` only for a private local development workflow where controlled
-lifecycle transitions are intentionally being exercised.
+## CI and skipped gates
+
+`.github/workflows/ci.yml` runs Ruff, unit tests, shell syntax, Compose validation,
+container builds/hardening, and a PostgreSQL integration job. Locally, the
+Docker-dependent release, security, backup, and live-process checks require their
+disposable prerequisites; without them they are skipped/unrun and do not become
+evidence through unit tests alone. PostgreSQL integration tests skip when
+`TEST_DATABASE_URL` is absent.
 
 ## Migration and bootstrap procedure
 
@@ -124,4 +136,5 @@ not a production backup policy.
 6. Record the exact revision, migration result, and remaining data compatibility risks.
 
 There is no automatic destructive rollback, schema creation at startup, or cloud
-provisioning in this repository.
+provisioning in this repository. Rollback of the existing Cloud Run deployment is an
+operator-controlled release action; this runbook does not claim a live rollback drill.

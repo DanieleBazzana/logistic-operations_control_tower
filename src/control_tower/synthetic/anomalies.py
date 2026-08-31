@@ -1,4 +1,4 @@
-"""Scenario labels used to make M02 source fixtures useful to future detection."""
+"""Scenario labels used to make deterministic source fixtures useful to detection."""
 
 SCENARIO_IDS = (
     "SLA_BREACH_RISK",

@@ -79,17 +79,23 @@ def test_compose_passes_postgres_fields_without_interpolating_password_into_url(
     )
 
 
-def test_release_documents_separate_m06_and_m07_verification_boundaries():
+def test_release_documents_separate_historical_m06_and_current_m07_evidence():
     architecture = (ROOT / "docs/architecture.md").read_text(encoding="utf-8")
     release_review = (ROOT / "docs/release-review.md").read_text(encoding="utf-8")
 
-    for document in (architecture, release_review):
-        assert "M06" in document
-        assert "scripts/verify_release.sh" in document
-        assert "scripts/verify_m07.sh" in document
-        assert "scripts/security_check.sh" in document
-        assert "scripts/backup_restore_drill.sh" in document
-        assert "M07" in document
+    assert "M06" in architecture
+    assert "M06 and M07 verification boundaries" in architecture
+    for gate in (
+        "scripts/verify_release.sh",
+        "scripts/verify_m07.sh",
+        "scripts/security_check.sh",
+        "scripts/backup_restore_drill.sh",
+    ):
+        assert gate in architecture
+        assert gate in release_review
+
+    assert "M07 traceability" in release_review
+    assert "history" in release_review
     assert "Digest pinning" in release_review
     assert "lockfile" in release_review
     assert "non-blocking" in release_review

@@ -1,10 +1,12 @@
 # M07 deployment architecture
 
-M07 adds a production-like local delivery boundary without changing the M01-M06
-business or API contracts.
+This is the M07 delivery record for the current product boundary. The public demo is
+served by the existing Cloud Run deployment, with FastAPI, Streamlit, and Neon
+PostgreSQL; the repository retains the local topology below as its reproducible
+verification path. M07 did not change the business or API contracts.
 
 ```text
-PostgreSQL volume
+Local PostgreSQL volume / deployed Neon PostgreSQL
        ^
        | explicit PostgreSQL fields -> safe SQLAlchemy URL
        |
@@ -28,7 +30,7 @@ PostgreSQL volume
   startup.
 - The containers honor `PORT`; production commands bind all interfaces and do not
   enable reload or debug. Compose maps them to loopback-only host ports for local
-  use. Future Cloud Run services can supply their own provider `PORT`.
+  use. Existing Cloud Run services supply the provider `PORT`.
 - `/api/v1/livez` is process-only; `/api/v1/readyz` checks PostgreSQL. The existing
   `/api/v1/health` remains a compatibility database readiness endpoint.
 - Request middleware returns a safe `X-Request-ID` and emits structured JSON with
@@ -43,16 +45,24 @@ development. When true, FastAPI rejects the lifecycle PATCH route server-side wi
 state or append history. Streamlit reads the same environment boundary and hides
 its lifecycle form. Existing GET routes remain anonymous read-only operational
 surfaces. Authentication, OAuth/SSO, user management, and enterprise RBAC are not
-part of M07.
+provided by the current product.
 
-## Future provider mapping
+## Current provider mapping
 
-The local topology is intentionally provider-neutral. A future deployment may map
-FastAPI and Streamlit to separate Cloud Run services, use `min instances=0`, and
-connect to Neon PostgreSQL. A reviewed provider manifest may supply placeholders for
-these bindings, but this repository does not provision resources, create secrets,
-or contain provider credentials. Alembic and deterministic bootstrap remain
-explicit release jobs in that future topology.
+The existing deployment maps the FastAPI API and Streamlit dashboard to Cloud Run and
+uses Neon PostgreSQL for persistence. Cloud Run service URLs, IAM, secrets, Neon
+connection details, and deployment manifests are external to this repository; no
+provider resource is provisioned or changed here. Alembic migration and deterministic
+bootstrap remain explicit release jobs rather than web startup behavior. The public
+demo is read-only through the server-side `PUBLIC_DEMO_READ_ONLY` boundary.
+
+## CI and evidence boundary
+
+GitHub Actions in `.github/workflows/ci.yml` runs Ruff, unit tests, shell syntax,
+Compose validation, container builds/hardening, and a PostgreSQL integration job.
+The local M07 scripts provide the same delivery checks with disposable resources;
+Docker-dependent and database-dependent checks are not implied by AppTest or unit
+results when their prerequisites are unavailable.
 
 ## Conservative cost and pricing posture
 
@@ -61,7 +71,7 @@ limits change; no dynamic price or quota has been verified for this repository. 
 future cost estimate must label unverified values `PRICE_NOT_VERIFIED`, include the
 verification date, and link to the current official pricing page.
 
-- **Cloud Run:** a Google Cloud billing account/project is required before deploying
+- **Cloud Run:** a Google Cloud billing account/project is required before changing
   Cloud Run services; see the [billing-account troubleshooting guidance](https://cloud.google.com/run/docs/troubleshooting#billing-account).
   The intended baseline is `min instances=0` for both API and dashboard, allowing
   scale-to-zero when idle; this reduces idle compute but does not guarantee a $0 bill.

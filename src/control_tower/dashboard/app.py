@@ -1,4 +1,4 @@
-"""Streamlit executable entry point for the M05 dashboard."""
+"""Streamlit executable entry point for the Operations Control Tower."""
 
 from control_tower.dashboard.ui import main
 

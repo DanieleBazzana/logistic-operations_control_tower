@@ -2,17 +2,19 @@
 
 This document is the public, software-only release record for the Logistic/Supply
 Chain Operations Control Tower. It maps product requirements to the implementation,
-tests, and executable verification paths. Source data and all example credentials are
+tests, and executable verification paths. The public demo is read-only, uses the
+existing Cloud Run deployment and Neon PostgreSQL, and has no credentials or live
+service URLs in this repository. Source data and all example credentials are
 synthetic/local-only.
 
-## M06 versus M07 verification boundaries
+## Verification boundaries and M07 evidence history
 
-`scripts/verify_release.sh` is the M06 disposable application-flow gate. It covers
+The historical application-flow gate is `scripts/verify_release.sh`. It covers
 isolated PostgreSQL migration, deterministic generation, ingestion/detection
 idempotency, API and dashboard smoke, lifecycle history, export, and the PostgreSQL
-integration suite. It does not prove M07 image, security, or backup/restore behavior.
+integration suite. It does not prove container, security, or backup/restore behavior.
 
-M07 has separate gates: `scripts/verify_m07.sh` builds and exercises the independent
+For M07 traceability, separate gates remain: `scripts/verify_m07.sh` builds and exercises the independent
 API/dashboard containers and explicit Compose migration/bootstrap jobs;
 `scripts/security_check.sh` checks tracked secret-bearing filenames, dependency-audit
 availability, and built-image hardening; and `scripts/backup_restore_drill.sh` runs a
@@ -20,6 +22,11 @@ disposable backup/restore schema-and-data check. These commands complement
 `verify_release.sh`, rather than being alternate names for it. Their Docker-dependent
 evidence is non-blocking when Docker/Compose is unavailable and must be reported as
 unrun, not inferred from unit tests.
+
+The live deployment is outside these local scripts: Cloud Run hosts the API and
+dashboard boundary, Neon PostgreSQL is the deployed persistence boundary, and
+`PUBLIC_DEMO_READ_ONLY=true` disables lifecycle writes in the public demo. No live URL,
+Cloud Run revision, Neon branch, or production rollback result is claimed here.
 
 ### Non-blocking supply-chain limitation
 
@@ -38,7 +45,7 @@ Status vocabulary:
   authoritative evidence requires the isolated PostgreSQL release command.
 - **Implemented; live-process gate** — the behavior has rendering/AppTest coverage and
   the release command also probes the real HTTP process.
-- **Limit / not provided** — an intentional boundary of this local portfolio MVP.
+- **Limit / not provided** — an intentional boundary of the current public product.
 
 | Requirement | Concrete implementation evidence | Test / command evidence | Status and explicit limits |
 | --- | --- | --- | --- |
@@ -54,7 +61,7 @@ Status vocabulary:
 | Lifecycle and immutable history | `src/control_tower/exceptions/lifecycle.py` defines legal transitions; `service.py` writes `exception_history`; migration `20250827_02_exception_history_immutable.py` protects the database boundary. | `tests/unit/test_exception_service_lifecycle.py` covers initial history, legal paths, terminal states, ORM immutability, and migration declarations; release gate runs `OPEN -> ACKNOWLEDGED -> IN_PROGRESS -> RESOLVED` and checks history. | **Implemented; disposable-environment gate.** Terminal states cannot transition; authentication/RBAC around the operator identity is not provided. |
 | Eight dashboard KPIs | `src/control_tower/kpis/service.py` and `src/control_tower/api/schemas.py` expose `orders_processed`, `sla_performance_pct`, `open_exceptions`, `critical_exceptions`, `revenue_at_risk`, `stockout_risks`, `supplier_delays`, and `shipment_delays`; `dashboard/ui.py::KPI_DEFINITIONS` renders all eight. | `tests/unit/test_api.py::test_kpi_summary_is_deterministic_and_revenue_is_finding_level`; dashboard KPI rendering tests; release gate checks all eight response keys. | **Implemented and locally verified.** KPI results are persisted-row, point-in-time aggregates; detection is not run by the KPI read path. |
 | Versioned API and operational collections | `src/control_tower/api/routes.py`, `queries.py`, and `schemas.py` provide `/api/v1/health`, orders, inventory, purchase orders, shipments, exceptions, status update, and KPI summary routes with pagination, filters, stable ordering, and safe error mapping. | `tests/unit/test_api.py` covers collection contracts, filters, bounds, validation, lifecycle conflicts, and KPI `as_of`; `tests/integration/test_api_postgres.py`; release gate probes health, KPI, queue, detail, filters, lifecycle/history, and export. | **Implemented; disposable-environment gate.** The API has no authentication/RBAC and no ingestion/detection control endpoint. |
-| Streamlit dashboard through the API boundary | `src/control_tower/dashboard/client.py` is the HTTP client; `src/control_tower/dashboard/ui.py` renders without database imports; `src/control_tower/dashboard/app.py` is the executable entry point. | `tests/unit/test_dashboard_client.py`; `tests/unit/test_dashboard_ui.py` uses `streamlit.testing.v1.AppTest`; `scripts/verify_release.sh` starts Streamlit and probes `/_stcore/health` plus `/`. | **Implemented; live-process gate.** It is a local MVP; deployment identity, scaling, observability, and production hardening remain outside this release. |
+| Streamlit dashboard through the API boundary | `src/control_tower/dashboard/client.py` is the HTTP client; `src/control_tower/dashboard/ui.py` renders without database imports; `src/control_tower/dashboard/app.py` is the executable entry point. | `tests/unit/test_dashboard_client.py`; `tests/unit/test_dashboard_ui.py` uses `streamlit.testing.v1.AppTest`; `scripts/verify_release.sh` starts Streamlit and probes `/_stcore/health` plus `/`. | **Implemented; live-process gate.** The public demo is read-only on the existing Cloud Run boundary; live deployment identity, URL, and runtime observability are external evidence not stored here. |
 | Exception queue, filters, detail, lifecycle update, and export | `dashboard/ui.py::render_dashboard`, `build_exception_filters`, `render_exception_detail`, and `exceptions_to_csv` provide type/severity/status/warehouse/entity filters, supplier purchase-order context, queue fields, detail fields/history, controlled status form, and all-page CSV export. | `tests/unit/test_dashboard_ui.py` covers KPI/queue rendering, supplier-filter separation, CSV rows, lifecycle validation, and cache invalidation; client pagination/export tests are in `tests/unit/test_dashboard_client.py`. | **Implemented and locally verified.** CSV export is CSV-only; Excel export, direct database access, and ingestion/detection controls are intentionally unsupported. |
 | End-to-end release evidence | `scripts/verify_release.sh` creates a unique Compose project/volume, validates the URL fail-closed, traps cleanup, migrates, generates, ingests, detects, starts API and Streamlit, probes public contracts, then runs integration tests. | `ALLOW_DESTRUCTIVE_TEST_DB=1 ./scripts/verify_release.sh` with exported synthetic/local values; command logs are temporary and not printed. | **Implemented; disposable-environment gate.** Requires Docker, Compose, `curl`, the repository `.venv`, a free API/dashboard port, and a synthetic password. |
 
@@ -130,8 +137,9 @@ API_BASE_URL=http://127.0.0.1:8000/api/v1 \
 - [ ] **Exception detail:** business impact, operational status, revenue at risk,
   affected orders, root cause, recommended action, confidence, detected timestamp,
   and lifecycle history are visible.
-- [ ] **Lifecycle demonstration:** submit a legal status change with a synthetic
-  actor and reason where required; verify the success message and refreshed status.
+- [ ] **Lifecycle demonstration (private local only):** submit a legal status change
+  with a synthetic actor and reason where required; verify the success message and
+  refreshed status. Do not perform this step against the public read-only demo.
 - [ ] **Supplier context (optional):** enter a synthetic supplier ID and show the
   purchase-order context table; do not describe supplier ID as a generic exception
   filter.
@@ -199,8 +207,9 @@ Known skipped or unsupported gates must remain visible:
 - The disposable PostgreSQL and live API/Streamlit process checks require Docker,
   Compose, `curl`, a working `.venv`, and free loopback ports.
 - There is no production connector, authentication/RBAC, multi-tenant isolation,
-  scheduler/queue, notification integration, forecasting, Excel export, cloud
-  deployment, or production observability in this local MVP.
+  scheduler/queue, notification integration, forecasting, Excel export, or
+  production observability. The existing Cloud Run/Neon deployment is external
+  evidence, not a provisioning or live-rollback capability in this repository.
 - A passing AppTest proves the rendering boundary with a fake client; only the
   release command's live HTTP probes prove the real Streamlit entry point starts and
   serves its health/root endpoints.

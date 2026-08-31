@@ -6,6 +6,8 @@ import csv
 import io
 import os
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -68,6 +70,42 @@ QUEUE_COLUMNS = (
     "recommended_action",
 )
 
+QUEUE_COLUMN_LABELS = {
+    "id": "Exception ID",
+    "exception_type": "Exception type",
+    "severity": "Severity",
+    "status": "Status",
+    "entity_type": "Entity type",
+    "entity_id": "Entity ID",
+    "business_impact": "Business impact",
+    "revenue_at_risk": "Revenue at risk",
+    "orders_affected": "Orders affected",
+    "detected_at": "Detected at",
+    "recommended_action": "Recommended action",
+}
+
+HISTORY_COLUMN_LABELS = {
+    "id": "History ID",
+    "from_status": "Previous status",
+    "to_status": "New status",
+    "changed_at": "Changed at",
+    "actor": "Changed by",
+    "transition_reason": "Reason",
+}
+
+PURCHASE_ORDER_COLUMN_LABELS = {
+    "source_purchase_order_id": "Purchase order ID",
+    "po_number": "PO number",
+    "source_supplier_id": "Supplier ID",
+    "supplier_name": "Supplier",
+    "source_warehouse_id": "Warehouse ID",
+    "status": "Status",
+    "ordered_at": "Ordered at",
+    "expected_delivery_at": "Expected delivery",
+    "received_at": "Received at",
+    "remaining_quantity": "Remaining quantity",
+}
+
 
 def build_exception_filters(
     *,
@@ -78,7 +116,7 @@ def build_exception_filters(
     entity_type: str = "",
     entity_id: str = "",
 ) -> dict[str, Any]:
-    """Translate controls to M04 names; supplier is intentionally excluded."""
+    """Translate dashboard controls to API filter names; supplier is context-only."""
 
     filters: dict[str, Any] = {}
     if exception_types:
@@ -118,6 +156,135 @@ def exceptions_to_csv(rows: Sequence[Mapping[str, Any]]) -> str:
     return output.getvalue()
 
 
+def format_enum(value: Any) -> str:
+    """Turn API enum values into readable labels without changing wire values."""
+
+    if value is None or value == "":
+        return "—"
+    raw_value = str(getattr(value, "value", value)).replace("_", " ").lower()
+    if raw_value.startswith("sla "):
+        return "SLA " + raw_value[4:]
+    return raw_value.capitalize()
+
+
+def format_currency(value: Any) -> str:
+    """Format money for display while leaving API and CSV values untouched."""
+
+    if value is None or value == "":
+        return "—"
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return str(value)
+    return f"${amount:,.2f}"
+
+
+def format_timestamp(value: Any) -> str:
+    """Format an API timestamp consistently in UTC for operations users."""
+
+    if value is None or value == "":
+        return "—"
+    try:
+        timestamp = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return str(value)
+        return timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return str(value)
+
+
+def format_confidence(value: Any) -> str:
+    """Render the API's decimal confidence ratio as a percentage."""
+
+    if value is None or value == "":
+        return "—"
+    try:
+        confidence = Decimal(str(value)) * 100
+    except (InvalidOperation, ValueError):
+        return str(value)
+    percent = confidence.quantize(Decimal("0.1"))
+    return f"{percent:.1f}".rstrip("0").rstrip(".") + "%"
+
+
+def queue_snapshot_as_of(body: Mapping[str, Any]) -> datetime | None:
+    """Find the deterministic detection instant carried by queue rows."""
+
+    # The queue response has no response-level ``as_of``; ``detected_at`` is the
+    # existing row field written from the detection run instant, shared by the
+    # findings in a deterministic dataset.
+    candidates: list[datetime] = []
+    for row in body.get("items", []):
+        value = row.get("detected_at")
+        if value:
+            try:
+                timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if timestamp.tzinfo is not None and timestamp.utcoffset() is not None:
+                candidates.append(timestamp.astimezone(timezone.utc))
+    return max(candidates) if candidates else None
+
+
+def _format_queue_rows(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    presented = []
+    for row in rows:
+        presented.append(
+            {
+                QUEUE_COLUMN_LABELS[column]: (
+                    format_enum(row.get(column))
+                    if column in {"exception_type", "severity", "status"}
+                    else format_currency(row.get(column))
+                    if column == "revenue_at_risk"
+                    else format_timestamp(row.get(column))
+                    if column == "detected_at"
+                    else row.get(column, "—")
+                )
+                for column in QUEUE_COLUMNS
+            }
+        )
+    return pd.DataFrame(presented, columns=list(QUEUE_COLUMN_LABELS.values()))
+
+
+def _format_history_rows(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                HISTORY_COLUMN_LABELS[column]: (
+                    format_enum(row.get(column))
+                    if column in {"from_status", "to_status"}
+                    else format_timestamp(row.get(column))
+                    if column == "changed_at"
+                    else row.get(column, "—")
+                )
+                for column in HISTORY_COLUMN_LABELS
+            }
+            for row in rows
+        ],
+        columns=list(HISTORY_COLUMN_LABELS.values()),
+    )
+
+
+def _format_purchase_order_rows(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                PURCHASE_ORDER_COLUMN_LABELS[column]: (
+                    format_enum(row.get(column))
+                    if column == "status"
+                    else format_timestamp(row.get(column))
+                    if column.endswith("_at")
+                    else row.get(column, "—")
+                )
+                for column in PURCHASE_ORDER_COLUMN_LABELS
+            }
+            for row in rows
+        ],
+        columns=list(PURCHASE_ORDER_COLUMN_LABELS.values()),
+    )
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
@@ -149,23 +316,28 @@ def _format_kpi(value: Any, kind: str) -> str:
     if value is None:
         return "—"
     if kind == "money":
-        return f"${value}"
+        return format_currency(value)
     if kind == "percent":
         return f"{value}%"
     return str(value)
 
 
 def _sidebar_filters() -> tuple[dict[str, Any], str, int]:
-    st.sidebar.header("Filters")
-    exception_types = st.sidebar.multiselect("Exception type", EXCEPTION_TYPES)
-    severities = st.sidebar.multiselect("Severity", SEVERITIES)
-    statuses = st.sidebar.multiselect(
-        "Status", STATUSES, default=["OPEN", "ACKNOWLEDGED", "IN_PROGRESS"]
+    st.sidebar.header("Queue filters")
+    exception_types = st.sidebar.multiselect(
+        "Exception type", EXCEPTION_TYPES, format_func=format_enum
     )
-    warehouse_id = st.sidebar.text_input("Warehouse ID")
+    severities = st.sidebar.multiselect("Severity", SEVERITIES, format_func=format_enum)
+    statuses = st.sidebar.multiselect(
+        "Lifecycle status",
+        STATUSES,
+        default=["OPEN", "ACKNOWLEDGED", "IN_PROGRESS"],
+        format_func=format_enum,
+    )
+    warehouse_id = st.sidebar.text_input("Warehouse ID", help="Filter exceptions to one warehouse.")
     entity_type = st.sidebar.text_input("Entity type")
     entity_id = st.sidebar.text_input("Entity ID")
-    supplier_id = st.sidebar.text_input("Supplier ID (purchase-order context)")
+    supplier_id = st.sidebar.text_input("Supplier ID", help="Optional purchase-order context.")
     page_size = st.sidebar.selectbox("Rows per page", (25, 50, 100), index=0)
     filters = build_exception_filters(
         exception_types=exception_types,
@@ -187,30 +359,30 @@ def render_kpis(summary: Mapping[str, Any]) -> None:
 
 
 def render_exception_detail(client: Any, exception_id: int) -> None:
-    with st.spinner("Loading exception detail..."):
+    with st.spinner("Loading exception details…"):
         try:
             detail = client.get_exception(exception_id)
         except DashboardAPIError as error:
             st.error(str(error))
             return
 
-    st.subheader(f"Exception detail · #{detail.get('id', exception_id)}")
+    st.subheader(f"Exception details · #{detail.get('id', exception_id)}")
     st.write(f"**Business impact:** {detail.get('business_impact', '—')}")
-    st.write(f"**Operational status:** {detail.get('status', '—')}")
+    st.write(f"**Operational status:** {format_enum(detail.get('status'))}")
     left, right = st.columns(2)
     with left:
-        st.write(f"**Revenue at risk:** {detail.get('revenue_at_risk', '—')}")
+        st.write(f"**Revenue at risk:** {format_currency(detail.get('revenue_at_risk'))}")
         st.write(f"**Orders affected:** {detail.get('orders_affected', '—')}")
         st.write(f"**Root cause:** {detail.get('root_cause', '—')}")
     with right:
         st.write(f"**Recommended action:** {detail.get('recommended_action', '—')}")
-        st.write(f"**Confidence:** {detail.get('confidence', '—')}")
-        st.write(f"**Detected:** {detail.get('detected_at', '—')}")
+        st.write(f"**Confidence:** {format_confidence(detail.get('confidence'))}")
+        st.write(f"**Detected:** {format_timestamp(detail.get('detected_at'))}")
 
     history = detail.get("history") or []
     if history:
-        st.caption("Lifecycle history")
-        st.dataframe(pd.DataFrame(history), hide_index=True, use_container_width=True)
+        st.subheader("Lifecycle history")
+        st.dataframe(_format_history_rows(history), hide_index=True, use_container_width=True)
 
     if public_demo_read_only():
         st.info("The public demo is read-only; lifecycle updates are disabled.")
@@ -222,10 +394,10 @@ def render_exception_detail(client: Any, exception_id: int) -> None:
         st.info("This exception is in a terminal state; no further transition is available.")
         return
     with st.form(f"lifecycle-{exception_id}"):
-        target_status = st.selectbox("New operational status", transitions)
-        actor = st.text_input("Actor")
-        reason = st.text_area("Reason", help="Required when resolving or dismissing.")
-        submitted = st.form_submit_button("Save status")
+        target_status = st.selectbox("New lifecycle status", transitions, format_func=format_enum)
+        actor = st.text_input("Operator name")
+        reason = st.text_area("Transition reason", help="Required when resolving or dismissing.")
+        submitted = st.form_submit_button("Update exception")
     if submitted:
         if not actor.strip():
             st.error("Actor is required.")
@@ -250,7 +422,7 @@ def _supplier_context(client: Any, supplier_id: str, warehouse_id: str) -> None:
         return
     st.subheader("Supplier context")
     filters = build_purchase_order_filters(supplier_id, warehouse_id)
-    with st.spinner("Loading supplier purchase orders..."):
+    with st.spinner("Loading supplier purchase orders…"):
         try:
             body = _cache_get(
                 "purchase_orders",
@@ -262,32 +434,25 @@ def _supplier_context(client: Any, supplier_id: str, warehouse_id: str) -> None:
             return
     orders = body.get("items", [])
     if not orders:
-        st.info("No purchase orders match this supplier context.")
+        st.info("No purchase orders match this supplier.")
         return
-    st.dataframe(pd.DataFrame(orders), hide_index=True, use_container_width=True)
+    st.dataframe(_format_purchase_order_rows(orders), hide_index=True, use_container_width=True)
 
 
 def render_dashboard(client) -> None:
-    """Render the complete dashboard; ``client`` is injectable for AppTest/fakes."""
+    """Render the complete dashboard; ``client`` is injectable for AppTest and fakes."""
 
     st.set_page_config(page_title="Operations Control Tower", layout="wide")
     st.title("Operations Control Tower")
-    st.caption("M05 dashboard · read data through the versioned FastAPI boundary")
+    st.subheader("Prioritize operational exceptions, understand impact, and coordinate resolution.")
+    if public_demo_read_only():
+        st.caption("Public Demo · Read Only")
     filters, supplier_id, page_size = _sidebar_filters()
     warehouse_id = str(filters.pop("_warehouse_id", ""))
 
-    with st.spinner("Loading KPI summary..."):
-        try:
-            summary = _cache_get("summary", {}, client.summary)
-        except DashboardAPIError as error:
-            st.error(str(error))
-            st.info("Start the M04 API and confirm API_BASE_URL before retrying.")
-            return
-    render_kpis(summary)
-
-    st.header("Exception Queue")
-    page = st.number_input("Queue page", min_value=1, value=1, step=1)
-    with st.spinner("Loading exception queue..."):
+    st.header("Exception queue")
+    page = st.number_input("Queue page number", min_value=1, value=1, step=1)
+    with st.spinner("Loading exception queue…"):
         try:
             body = _cache_get(
                 "exceptions",
@@ -295,35 +460,47 @@ def render_dashboard(client) -> None:
                 lambda: client.list_exceptions(page=page, page_size=page_size, filters=filters),
             )
         except DashboardAPIError as error:
-            st.error(str(error))
+            st.error(f"Unable to load the exception queue. {error}")
             return
     rows = body.get("items", [])
+    snapshot_as_of = queue_snapshot_as_of(body)
+
+    with st.spinner("Loading operational summary…"):
+        try:
+            summary_params = {"as_of": snapshot_as_of} if snapshot_as_of else {}
+            summary = _cache_get(
+                "summary", summary_params, lambda: client.summary(**summary_params)
+            )
+        except DashboardAPIError as error:
+            st.error(f"Unable to load the operational summary. {error}")
+            return
+    render_kpis(summary)
+    st.caption(f"Snapshot: {format_timestamp(summary.get('as_of'))}")
+
     total = int(body.get("total", len(rows)))
-    st.caption(f"Showing page {int(page)} · {total} matching exceptions")
+    st.caption(f"Page {int(page)} · {total} exceptions match the current filters")
     if not rows:
-        st.info("No exceptions match the selected filters.")
+        st.info("No exceptions match the current filters.")
     else:
-        frame = pd.DataFrame(
-            [{column: row.get(column, "") for column in QUEUE_COLUMNS} for row in rows]
-        )
+        frame = _format_queue_rows(rows)
         st.dataframe(frame, hide_index=True, use_container_width=True)
         try:
             all_rows = _cache_get(
                 "exception_export", filters, lambda: client.get_all_exceptions(filters)
             )
             st.download_button(
-                "Download filtered queue CSV",
+                "Download queue CSV",
                 data=exceptions_to_csv(all_rows),
                 file_name="operations-exception-queue.csv",
                 mime="text/csv",
             )
         except DashboardAPIError as error:
-            st.error(str(error))
+            st.error(f"Unable to prepare the queue export. {error}")
 
         ids = [int(row["id"]) for row in rows if row.get("id") is not None]
         if ids:
             selected_id = st.selectbox(
-                "Open exception detail", ids, format_func=lambda value: f"Exception #{value}"
+                "Select an exception", ids, format_func=lambda value: f"Exception #{value}"
             )
             render_exception_detail(client, selected_id)
 

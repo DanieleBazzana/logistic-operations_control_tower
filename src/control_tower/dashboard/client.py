@@ -2,7 +2,7 @@
 
 The dashboard deliberately has no database imports. API response values are kept
 as decoded JSON (not converted to floats), so Decimal and money strings retain
-M04's wire precision all the way to the UI and CSV export.
+wire precision all the way to the UI and CSV export.
 """
 
 from __future__ import annotations

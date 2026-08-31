@@ -1,4 +1,7 @@
 
+from datetime import datetime, timezone
+
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from control_tower.dashboard.ui import (
@@ -6,6 +9,10 @@ from control_tower.dashboard.ui import (
     build_exception_filters,
     build_purchase_order_filters,
     exceptions_to_csv,
+    format_confidence,
+    format_currency,
+    format_enum,
+    format_timestamp,
 )
 
 EXCEPTION = {
@@ -18,7 +25,7 @@ EXCEPTION = {
     "business_impact": "Late order",
     "revenue_at_risk": "125.00",
     "orders_affected": 1,
-    "detected_at": "2025-01-15T12:00:00Z",
+    "detected_at": "2025-03-01T12:00:00Z",
     "recommended_action": "Expedite",
     "root_cause": "Carrier delay",
     "confidence": "0.9000",
@@ -26,15 +33,24 @@ EXCEPTION = {
     "history": [],
 }
 
+QUEUE_AS_OF = datetime(2025, 3, 1, 12, tzinfo=timezone.utc)
+SUMMARY_FALLBACK_AS_OF = "2025-01-15T12:00:00Z"
+
 
 class FakeClient:
     def __init__(self):
         self.updated = []
         self.status = "OPEN"
+        self.list_calls = []
+        self.summary_calls = []
 
     def summary(self, **kwargs):
+        self.summary_calls.append(kwargs)
+        as_of = kwargs.get("as_of", SUMMARY_FALLBACK_AS_OF)
+        if isinstance(as_of, datetime):
+            as_of = as_of.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         return {
-            "as_of": "2025-01-15T12:00:00Z",
+            "as_of": as_of,
             "orders_processed": 10,
             "open_orders": 3,
             "fulfilled_orders": 6,
@@ -49,6 +65,7 @@ class FakeClient:
         }
 
     def list_exceptions(self, **kwargs):
+        self.list_calls.append(kwargs)
         return {"items": [EXCEPTION], "page": 1, "page_size": 25, "total": 1}
 
     def get_all_exceptions(self, filters=None):
@@ -109,6 +126,40 @@ def test_exception_csv_serializes_all_filtered_rows():
     assert "2,SLA_BREACH_RISK" in csv_text
 
 
+def test_dashboard_formats_wire_values_for_operations_users():
+    assert format_enum("SLA_BREACH_RISK") == "SLA breach risk"
+    assert format_enum("IN_PROGRESS") == "In progress"
+    assert format_currency("1234567.50") == "$1,234,567.50"
+    assert format_timestamp("2025-01-15T12:00:00Z") == "2025-01-15 12:00 UTC"
+    assert format_confidence("0.9000") == "90%"
+
+
+@pytest.fixture(autouse=True)
+def _disable_public_demo(monkeypatch):
+    monkeypatch.delenv("PUBLIC_DEMO_READ_ONLY", raising=False)
+
+
+def test_dashboard_requests_kpis_at_the_queue_snapshot():
+    client = FakeClient()
+
+    test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
+
+    assert test_app.exception == []
+    assert client.summary_calls == [{"as_of": QUEUE_AS_OF}]
+
+
+def test_dashboard_keeps_queue_snapshot_when_filters_change():
+    client = FakeClient()
+    test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
+
+    test_app.sidebar.multiselect[0].set_value(["SLA_BREACH_RISK"])
+    test_app.run()
+
+    assert test_app.exception == []
+    assert client.list_calls[-1]["filters"]["exception_type"] == ["SLA_BREACH_RISK"]
+    assert client.summary_calls == [{"as_of": QUEUE_AS_OF}]
+
+
 def _run_dashboard(client):
     from control_tower.dashboard.ui import render_dashboard
 
@@ -120,9 +171,9 @@ def test_dashboard_renders_kpis_queue_and_supplier_context_with_fake_client():
 
     assert test_app.exception == []
     assert any(item.label == "Orders processed" and item.value == "10" for item in test_app.metric)
-    assert any(item == "SLA_BREACH_RISK" for item in test_app.dataframe[0].value["exception_type"])
-    assert any("Exception Queue" in item.value for item in test_app.header)
-    assert any("**Operational status:** OPEN" in item.value for item in test_app.markdown)
+    assert any(item == "SLA breach risk" for item in test_app.dataframe[0].value["Exception type"])
+    assert any("Exception queue" in item.value for item in test_app.header)
+    assert any("**Operational status:** Open" in item.value for item in test_app.markdown)
 
 
 def _run_exception_detail(client):
