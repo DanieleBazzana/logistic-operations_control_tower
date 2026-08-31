@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-control_tower}
       POSTGRES_USER: ${POSTGRES_USER:-control_tower}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD explicitly}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -13,8 +13,81 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
       start_period: 5s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-control_tower}
+      POSTGRES_USER: ${POSTGRES_USER:-control_tower}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD explicitly}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-control_tower}
+      POSTGRES_USER: ${POSTGRES_USER:-control_tower}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD explicitly}
+      DETERMINISTIC_SEED: ${DETERMINISTIC_SEED:-20250301}
+      AS_OF: ${AS_OF:-2025-01-15T12:00:00Z}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      ["python", "-m", "control_tower.bootstrap", "--output-dir", "/tmp/control_tower_demo_bundle"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-control_tower}
+      POSTGRES_USER: ${POSTGRES_USER:-control_tower}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD explicitly}
+      PUBLIC_DEMO_READ_ONLY: ${PUBLIC_DEMO_READ_ONLY:-false}
+      AS_OF: ${AS_OF:-2025-01-15T12:00:00Z}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8080"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      API_BASE_URL: http://api:8080/api/v1
+      PUBLIC_DEMO_READ_ONLY: ${PUBLIC_DEMO_READ_ONLY:-false}
+      PORT: 8501
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   postgres_data:

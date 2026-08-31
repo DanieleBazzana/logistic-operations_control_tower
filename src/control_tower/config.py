@@ -7,6 +7,7 @@ from typing import Protocol
 
 from pydantic import AnyHttpUrl, Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 
 class _ConfigWithMainOption(Protocol):
@@ -35,6 +36,26 @@ def set_alembic_database_url(config: _ConfigWithSetMainOption, database_url: str
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 
+def build_database_url(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+) -> str:
+    """Build a PostgreSQL URL while safely escaping each connection component."""
+
+    return URL.create(
+        drivername="postgresql+psycopg",
+        username=username,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+    ).render_as_string(hide_password=False)
+
+
 class Settings(BaseSettings):
     """Validated, local-first configuration for the control tower."""
 
@@ -45,10 +66,14 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    database_url: PostgresDsn = PostgresDsn(
-        "postgresql+psycopg://control_tower:control_tower@localhost:5432/control_tower"
-    )
+    database_url: PostgresDsn | None = None
+    postgres_host: str = "localhost"
+    postgres_port: int = Field(default=5432, ge=1, le=65535)
+    postgres_db: str = "control_tower"
+    postgres_user: str = "control_tower"
+    postgres_password: str = "control_tower"
     api_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8000/api/v1")
+    public_demo_read_only: bool = False
     sla_risk_window_hours: int = Field(default=4, gt=0)
     safety_stock: Decimal = Field(default=Decimal("20"), ge=0)
     inventory_mismatch_tolerance: Decimal = Field(default=Decimal("5"), ge=0)
@@ -95,6 +120,23 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"severity {name} thresholds must satisfy medium <= high <= critical"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def build_database_url_from_postgres_fields(self) -> "Settings":
+        """Construct the runtime URL when Compose supplies separate fields."""
+
+        if self.database_url is None:
+            db_pwd = self.postgres_password
+            self.database_url = PostgresDsn(
+                build_database_url(
+                    host=self.postgres_host,
+                    port=self.postgres_port,
+                    database=self.postgres_db,
+                    username=self.postgres_user,
+                    password=db_pwd,
+                )
+            )
         return self
 
     @field_validator("as_of")

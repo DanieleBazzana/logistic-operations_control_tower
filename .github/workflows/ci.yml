@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feat/production-deployment"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip "setuptools>=83.0.0"
+      - run: python -m pip install ".[dev]"
+      - run: python -m pip check
+      - run: ruff check .
+      - run: python -m pytest -q
+      - run: bash -n scripts/*.sh
+      - run: |
+          POSTGRES_PASSWORD=ci-synthetic-password \
+          docker compose config --quiet
+      - run: docker build --file Dockerfile.api --tag control-tower-api:ci .
+      - run: docker build --file Dockerfile.dashboard --tag control-tower-dashboard:ci .
+      - name: Install dependency audit tool
+        run: python -m pip install "pip-audit>=2.7,<3.0"
+      - name: Security and container hardening checks
+        env:
+          API_IMAGE: control-tower-api:ci
+          DASHBOARD_IMAGE: control-tower-dashboard:ci
+        run: ./scripts/security_check.sh
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: control_tower_test
+          POSTGRES_USER: control_tower
+          POSTGRES_PASSWORD: ci-synthetic-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U control_tower -d control_tower_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ".[dev]"
+      - name: Migration from empty database
+        env:
+          DATABASE_URL: postgresql+psycopg://control_tower:ci-synthetic-password@127.0.0.1:5432/control_tower_test
+        run: python -m alembic upgrade head
+      - name: PostgreSQL integration suite
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://control_tower:ci-synthetic-password@127.0.0.1:5432/control_tower_test
+          ALLOW_DESTRUCTIVE_TEST_DB: "1"
+        run: python -m pytest tests/integration -q

@@ -2,6 +2,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
+from sqlalchemy.engine import make_url
 
 from control_tower.config import Settings, resolve_database_url, set_alembic_database_url
 
@@ -57,6 +58,25 @@ def test_settings_uses_database_url_from_environment(monkeypatch: pytest.MonkeyP
     assert settings.database_url.unicode_string() == (
         "postgresql+psycopg://override:override@postgres:5432/override"
     )
+
+
+def test_settings_builds_postgres_url_with_reserved_password_characters() -> None:
+    password = "p@ss:#%/word"
+
+    settings = Settings(
+        _env_file=None,
+        postgres_host="db.internal",
+        postgres_port=5433,
+        postgres_db="operations",
+        postgres_user="control_tower",
+        postgres_password=password,
+    )
+
+    parsed = make_url(str(settings.database_url))
+    assert parsed.password == password
+    assert parsed.host == "db.internal"
+    assert parsed.port == 5433
+    assert parsed.database == "operations"
 
 
 def test_settings_rejects_non_positive_sla_risk_window(monkeypatch: pytest.MonkeyPatch) -> None:

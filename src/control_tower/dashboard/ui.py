@@ -41,6 +41,19 @@ LEGAL_TRANSITIONS = {
     "RESOLVED": (),
     "DISMISSED": (),
 }
+
+
+def public_demo_read_only() -> bool:
+    """Read the explicit UI safety boundary without loading database settings."""
+
+    return os.getenv("PUBLIC_DEMO_READ_ONLY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 QUEUE_COLUMNS = (
     "id",
     "exception_type",
@@ -199,6 +212,10 @@ def render_exception_detail(client: Any, exception_id: int) -> None:
         st.caption("Lifecycle history")
         st.dataframe(pd.DataFrame(history), hide_index=True, use_container_width=True)
 
+    if public_demo_read_only():
+        st.info("The public demo is read-only; lifecycle updates are disabled.")
+        return
+
     current_status = detail.get("status", "OPEN")
     transitions = LEGAL_TRANSITIONS.get(current_status, ())
     if not transitions:
@@ -333,5 +350,6 @@ __all__ = [
     "exceptions_to_csv",
     "invalidate_dashboard_cache",
     "main",
+    "public_demo_read_only",
     "render_dashboard",
 ]

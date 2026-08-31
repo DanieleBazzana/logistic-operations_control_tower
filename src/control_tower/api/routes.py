@@ -195,6 +195,24 @@ def health(engine=Depends(get_engine)) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/livez")
+def liveness() -> dict[str, str]:
+    """Report process liveness without touching the database."""
+
+    return {"status": "ok"}
+
+
+@router.get("/readyz")
+def readiness(engine=Depends(get_engine)) -> dict[str, str]:
+    """Report readiness only when the configured database accepts a query."""
+
+    try:
+        check_database_health(engine)
+    except Exception:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return {"status": "ok"}
+
+
 @router.get("/orders", response_model=Page[OrderOut])
 def orders(
     session: SessionDependency,
@@ -373,8 +391,13 @@ def exception_detail(exception_id: int, session: SessionDependency) -> Exception
 
 @router.patch("/exceptions/{exception_id}/status", response_model=ExceptionOut)
 def exception_status(
-    exception_id: int, payload: ExceptionStatusPatch, session: SessionDependency
+    exception_id: int,
+    payload: ExceptionStatusPatch,
+    session: SessionDependency,
+    settings: SettingsDependency,
 ) -> ExceptionOut:
+    if settings.public_demo_read_only:
+        raise HTTPException(status_code=403, detail="public demo is read-only")
     try:
         row = transition_exception(
             session,

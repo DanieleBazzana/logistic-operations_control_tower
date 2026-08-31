@@ -150,6 +150,23 @@ artifact comparison, ingest/re-ingest, detection/deduplication, API health/KPI/
 queue/detail/lifecycle smoke, and the PostgreSQL integration suite. Temporary logs
 are not retained and credentials are never printed.
 
+### M06 and M07 verification boundaries
+
+`scripts/verify_release.sh` is the M06 disposable release gate. It proves the
+M01-M06 application flow against isolated PostgreSQL: migration, deterministic
+generation, ingestion and detection idempotency, API/dashboard smoke, lifecycle
+history, export, and the PostgreSQL integration suite. It is not the M07 container
+delivery or security gate.
+
+M07 adds separate delivery and operational checks. `scripts/verify_m07.sh` builds and
+runs the independent API/dashboard images plus Compose migration/bootstrap and their
+local HTTP/restart checks. `scripts/security_check.sh` checks tracked secret-bearing
+filenames, dependency-audit availability, and built-image non-root/non-writable
+hardening. `scripts/backup_restore_drill.sh` is a separate disposable backup/restore
+schema-and-data check. These M07 commands complement rather than replace
+`verify_release.sh`; a M06 pass does not claim M07 container, security, or backup
+evidence, and vice versa.
+
 ## Out of scope
 
 The current architecture deliberately excludes:

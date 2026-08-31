@@ -36,10 +36,13 @@ python3.11 -m venv .venv
 cp .env.example .env
 ```
 
-`.env` is local and untracked. Replace the placeholder in
-`POSTGRES_PASSWORD` and `DATABASE_URL` with a local-only value; the two passwords
-must match, and URL-reserved characters must be encoded in `DATABASE_URL`.
-`DATABASE_URL` points to the runtime database `control_tower`.
+`.env` is local and untracked. Replace the placeholder in `POSTGRES_PASSWORD` with
+a local-only value. The application and Compose jobs pass `POSTGRES_HOST`,
+`POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and the raw `POSTGRES_PASSWORD`
+separately; application settings construct the SQLAlchemy URL safely, so a password
+containing URL-reserved characters does not need to be manually encoded for Compose.
+`DATABASE_URL` remains an optional, already-encoded explicit override for native
+commands; it is not required by the standard `.env` setup.
 
 ```bash
 set -a
@@ -127,12 +130,14 @@ terminal state. `exception_history` is append-only.
 Start the API after migration, ingestion, and detection:
 
 ```bash
-.venv/bin/python -m uvicorn control_tower.api.app:app --reload
+.venv/bin/python -m uvicorn control_tower.api.app:app \
+  --host 127.0.0.1 --port 8000 --no-server-header
 ```
 
 Available versioned routes:
 
 - `GET /api/v1/health`
+- `GET /api/v1/livez` and `/readyz`
 - `GET /api/v1/orders` and `/orders/{source_order_id}`
 - `GET /api/v1/inventory`
 - `GET /api/v1/purchase-orders`
@@ -188,10 +193,11 @@ set +a
 ALLOW_DESTRUCTIVE_TEST_DB=1 ./scripts/verify_release.sh
 ```
 
-`TEST_DATABASE_URL` must be distinct from `DATABASE_URL`, use PostgreSQL on
+`TEST_DATABASE_URL` must be distinct from the runtime target, use PostgreSQL on
 `localhost`, `127.0.0.1`, or `::1`, contain no query parameters, and name
 `control_tower_m04` or a database ending in `_test`. Its password must match
-`POSTGRES_PASSWORD`. The script overrides the isolated Compose database name from
+`POSTGRES_PASSWORD`; because this is a URL value, reserved password characters must
+be percent-encoded in this one variable. The script overrides the isolated Compose database name from
 the test URL, waits for `pg_isready`, migrates to the current `head`, compares two
 bundles byte-for-byte, ingests twice, detects twice, runs API health/KPI,
 queue/detail/filter/lifecycle/history/export checks, and runs the PostgreSQL
@@ -216,6 +222,69 @@ are removed during cleanup.
   would need identity, observability, scaling, and a stronger UI/API delivery model.
 - The release script assumes Docker, Docker Compose, `curl`, a repository `.venv`,
   and an available local API port (8000 by default; override with `API_PORT`).
+- Docker base images remain tag-pinned rather than digest-pinned, and Python
+  dependencies are not yet committed to a lockfile. Reproducible digest/lockfile
+  hardening is an optional, non-blocking follow-up to this local M07 gate.
+
+## M07 production-like local deployment
+
+M07 keeps production operations explicit and reversible while remaining local-only.
+The API and Streamlit dashboard have independent non-root images, bind only to
+configured ports, honor the provider-style `PORT` variable, and start without
+reload or debug mode. Application images contain no generated data or runtime
+filesystem state. `migrate` and `bootstrap` are separate one-shot Compose jobs;
+neither schema migration nor demo generation runs during web application startup.
+
+```bash
+export POSTGRES_PASSWORD=synthetic-local-password
+docker compose build api dashboard
+./scripts/bootstrap_demo.sh
+docker compose up -d api dashboard
+```
+
+Compose exposes the API at `http://127.0.0.1:${API_PORT:-8000}` and Streamlit at
+`http://127.0.0.1:${DASHBOARD_PORT:-8501}`. The PostgreSQL volume is the only
+persistent local service state. Re-running the bootstrap job regenerates the same
+bundle and uses existing ingestion/detection idempotency contracts.
+
+For a public demo, set `PUBLIC_DEMO_READ_ONLY=true` in the service environment.
+FastAPI rejects lifecycle PATCH requests with 403 before invoking the lifecycle
+service; the dashboard also omits its lifecycle form. Local development defaults
+to `false`, so existing controlled lifecycle behavior remains available. Anonymous
+read access is intentionally limited to the existing dashboard/KPI/queue/detail
+and operational GET routes; authentication, SSO, and enterprise RBAC are not
+introduced by M07.
+
+The liveness endpoint (`/api/v1/livez`) is process-only. Readiness (`/api/v1/readyz`)
+and the compatibility health endpoint (`/api/v1/health`) execute a lightweight
+database query and return 503 when PostgreSQL is unavailable. Every request gets a
+safe `X-Request-ID` response header and a structured JSON log containing only method,
+path, status, duration, and correlation ID—never query strings, bodies, or secrets.
+
+Run the complete local gate with synthetic disposable values:
+
+```bash
+export POSTGRES_PASSWORD=synthetic-release-password
+export TEST_DATABASE_URL=postgresql+psycopg://control_tower:synthetic-release-password@127.0.0.1:5432/control_tower_test
+export ALLOW_DESTRUCTIVE_TEST_DB=1
+./scripts/verify_m07.sh
+```
+
+The gate builds both images, migrates, bootstraps twice, checks API liveness/readiness,
+KPI/queue/detail, public mutation rejection and unchanged state/history, development
+lifecycle behavior, restart persistence, dashboard HTTP startup, and CSV export.
+`./scripts/security_check.sh` separately checks tracked secret-bearing filenames,
+dependency audit availability, and built-image hardening. `./scripts/backup_restore_drill.sh`
+separately performs a disposable `pg_dump` / `pg_restore` schema-and-data check. These
+M07 commands never source `.env` implicitly and clean up only their unique Compose
+project and volume.
+
+Rollback is local and non-destructive: stop the API/dashboard, keep the PostgreSQL
+volume, check out the reviewed prior image or source revision, run only migrations
+approved for that revision (downgrade only when the migration is explicitly
+reversible), then restart the independent services. Do not run destructive bootstrap
+as an application health hook. See [docs/operations.md](docs/operations.md) for the
+runbook and the future Cloud Run/Neon boundary.
 
 ## Verification shortcuts
 

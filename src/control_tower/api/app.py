@@ -7,6 +7,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_tower.api.errors import database_error_handler
+from control_tower.api.request_logging import RequestLoggingMiddleware
 from control_tower.api.routes import router
 from control_tower.config import Settings
 from control_tower.db import create_db_engine, create_session_factory
@@ -23,6 +24,7 @@ def create_app(*, engine: Engine | None = None, settings: Settings | None = None
     application.state.engine = bound_engine
     application.state.settings = configured_settings
     application.state.session_factory = create_session_factory(engine=bound_engine)
+    application.add_middleware(RequestLoggingMiddleware)
     application.add_exception_handler(SQLAlchemyError, database_error_handler)
     application.include_router(router, prefix="/api/v1")
     return application

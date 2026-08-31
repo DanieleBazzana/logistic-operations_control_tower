@@ -5,6 +5,29 @@ Chain Operations Control Tower. It maps product requirements to the implementati
 tests, and executable verification paths. Source data and all example credentials are
 synthetic/local-only.
 
+## M06 versus M07 verification boundaries
+
+`scripts/verify_release.sh` is the M06 disposable application-flow gate. It covers
+isolated PostgreSQL migration, deterministic generation, ingestion/detection
+idempotency, API and dashboard smoke, lifecycle history, export, and the PostgreSQL
+integration suite. It does not prove M07 image, security, or backup/restore behavior.
+
+M07 has separate gates: `scripts/verify_m07.sh` builds and exercises the independent
+API/dashboard containers and explicit Compose migration/bootstrap jobs;
+`scripts/security_check.sh` checks tracked secret-bearing filenames, dependency-audit
+availability, and built-image hardening; and `scripts/backup_restore_drill.sh` runs a
+disposable backup/restore schema-and-data check. These commands complement
+`verify_release.sh`, rather than being alternate names for it. Their Docker-dependent
+evidence is non-blocking when Docker/Compose is unavailable and must be reported as
+unrun, not inferred from unit tests.
+
+### Non-blocking supply-chain limitation
+
+The M07 images currently use tag-pinned base images and install the declared Python
+dependencies without a committed lockfile. Digest pinning and lockfile adoption are
+optional follow-up hardening, not blockers for this targeted M07 remediation; they
+must not be represented as completed release evidence.
+
 ## Product and release requirements
 
 Status vocabulary:
