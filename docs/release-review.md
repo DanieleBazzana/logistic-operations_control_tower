@@ -3,9 +3,9 @@
 This document is the public, software-only release record for the Logistic/Supply
 Chain Operations Control Tower. It maps product requirements to the implementation,
 tests, and executable verification paths. The public demo is read-only, uses the
-existing Cloud Run deployment and Neon PostgreSQL, and has no credentials or live
-service URLs in this repository. Source data and all example credentials are
-synthetic/local-only.
+existing Cloud Run deployment and Neon PostgreSQL, and has no credentials or
+provider-internal configuration in this repository. Its public entry points are
+listed in the README; source data and all example credentials are synthetic/local-only.
 
 ## Verification boundaries and M07 evidence history
 
@@ -25,8 +25,9 @@ unrun, not inferred from unit tests.
 
 The live deployment is outside these local scripts: Cloud Run hosts the API and
 dashboard boundary, Neon PostgreSQL is the deployed persistence boundary, and
-`PUBLIC_DEMO_READ_ONLY=true` disables lifecycle writes in the public demo. No live URL,
-Cloud Run revision, Neon branch, or production rollback result is claimed here.
+`PUBLIC_DEMO_READ_ONLY=true` disables lifecycle writes in the public demo. The
+public URLs are intentionally documented in the README; no Cloud Run revision,
+Neon branch, or production rollback result is claimed here.
 
 ### Non-blocking supply-chain limitation
 
@@ -49,12 +50,12 @@ Status vocabulary:
 
 | Requirement | Concrete implementation evidence | Test / command evidence | Status and explicit limits |
 | --- | --- | --- | --- |
-| Four synthetic operational sources: OMS, WMS, ERP/procurement, and carrier | `src/control_tower/synthetic/generator.py` writes the `oms/`, `wms/`, `erp/`, and `carrier/` artifact trees; `src/control_tower/synthetic/artifacts.py` defines the manifest contract. | `tests/unit/test_synthetic_generator.py::test_generation_manifest_has_target_volumes_and_six_source_scenarios`; `python -m control_tower.synthetic generate --output-dir <dir> --seed 20250301 --as-of 2025-01-15T12:00:00Z` | **Implemented and locally verified.** These are deterministic fixtures, not production connectors or live system integrations. |
+| Four synthetic operational sources: OMS, WMS, ERP/procurement, and carrier | `src/control_tower/synthetic/generator.py` writes the `oms/`, `wms/`, `erp/`, and `carrier/` artifact trees; `src/control_tower/synthetic/artifacts.py` defines the manifest contract. | `tests/unit/test_synthetic_generator.py::test_generation_manifest_has_target_volumes_and_six_source_scenarios`; `.venv/bin/python -m control_tower.synthetic generate --output-dir <dir> --seed 20250301 --as-of 2025-01-15T12:00:00Z` | **Implemented and locally verified.** These are deterministic fixtures, not production connectors or live system integrations. |
 | Deterministic generation | `generator.generate()` uses an explicit seed and timezone-aware `as_of`; artifacts are sorted and the manifest has a content identity. | `tests/unit/test_synthetic_generator.py`; `scripts/verify_release.sh` generates two bundles and compares every manifest/CSV byte-for-byte. | **Implemented and locally verified.** Reproducibility is guaranteed for the same generator version, seed, and instant; it is not a historical data replay. |
-| Validated, normalized, atomic ingestion | `src/control_tower/ingestion/readers.py`, `normalization.py`, `validation.py`, and `loader.py` validate schema, types, bounds, relationships, duplicate conflicts, timestamps, and snapshot freshness before one PostgreSQL transaction. | `tests/unit/test_ingestion_validation.py`, `test_ingestion_readers.py`, `test_ingestion_loader.py`; `python -m control_tower.ingestion ingest --input-dir <bundle>` | **Implemented and locally verified.** PostgreSQL is the supported runtime backend; ingestion is a CLI boundary, not an HTTP mutation endpoint. |
+| Validated, normalized, atomic ingestion | `src/control_tower/ingestion/readers.py`, `normalization.py`, `validation.py`, and `loader.py` validate schema, types, bounds, relationships, duplicate conflicts, timestamps, and snapshot freshness before one PostgreSQL transaction. | `tests/unit/test_ingestion_validation.py`, `test_ingestion_readers.py`, `test_ingestion_loader.py`; `.venv/bin/python -m control_tower.ingestion ingest --input-dir <bundle>` | **Implemented and locally verified.** PostgreSQL is the supported runtime backend; ingestion is a CLI boundary, not an HTTP mutation endpoint. |
 | Idempotent source ingestion | `src/control_tower/ingestion/loader.py` preflights existing source identifiers and distinguishes identical rows from conflicts; inventory uses natural-key freshness. | `tests/unit/test_ingestion_idempotency.py`; `tests/integration/test_ingestion_postgres.py::test_generated_bundle_ingests_idempotently_in_postgres`; the release gate ingests the same bundle twice. | **Implemented; disposable-environment gate.** Requires a fresh isolated PostgreSQL target for live persistence evidence. |
 | PostgreSQL persistence and Alembic ownership | `src/control_tower/models.py` defines the relational model; `migrations/versions/` owns schema changes; `alembic.ini` points at the migration tree and uses the platform path separator. | `tests/unit/test_db.py`, `tests/unit/test_models.py`, `tests/integration/test_postgres.py`; `.venv/bin/python -m alembic upgrade head`; release gate migrates its fresh Compose database. | **Implemented; disposable-environment gate.** The release gate requires Docker/Compose and a local disposable URL. |
-| Six exception types | `src/control_tower/enums.py::ExceptionType`, `src/control_tower/exceptions/rules.py::detect_all`, and `dashboard/ui.py::EXCEPTION_TYPES` define `SLA_BREACH_RISK`, `INVENTORY_SHORTAGE`, `STOCKOUT_RISK`, `INVENTORY_MISMATCH`, `SUPPLIER_DELAY`, and `SHIPMENT_DELAY`. | `tests/unit/test_exception_rules.py`; `tests/unit/test_synthetic_generator.py`; `tests/integration/test_exception_postgres.py`; `python -m control_tower.exceptions --as-of 2025-01-15T12:00:00Z` | **Implemented; disposable-environment gate.** Rules are deterministic and synchronous; no forecasting or ML exception class is included. |
+| Six exception types | `src/control_tower/enums.py::ExceptionType`, `src/control_tower/exceptions/rules.py::detect_all`, and `dashboard/ui.py::EXCEPTION_TYPES` define `SLA_BREACH_RISK`, `INVENTORY_SHORTAGE`, `STOCKOUT_RISK`, `INVENTORY_MISMATCH`, `SUPPLIER_DELAY`, and `SHIPMENT_DELAY`. | `tests/unit/test_exception_rules.py`; `tests/unit/test_synthetic_generator.py`; `tests/integration/test_exception_postgres.py`; `.venv/bin/python -m control_tower.exceptions --as-of 2025-01-15T12:00:00Z` | **Implemented; disposable-environment gate.** Rules are deterministic and synchronous; no forecasting or ML exception class is included. |
 | Severity and explainability | `src/control_tower/exceptions/severity.py` derives severity; `contracts.py` and `rules.py` carry business impact, root cause, recommended action, confidence, and risk metrics. | `tests/unit/test_exception_severity.py`, `test_exception_contracts.py`, and `test_exception_rules.py`. | **Implemented and locally verified.** Thresholds are configured rule values, not learned prioritization. |
 | Business impact, revenue, orders, root cause, action, and confidence | `src/control_tower/exceptions/contracts.py::ExceptionDetection`; `src/control_tower/models.py::ExceptionRecord`; `src/control_tower/api/schemas.py::ExceptionOut`; `dashboard/ui.py::render_exception_detail`. | `tests/unit/test_exception_contracts.py`, `tests/unit/test_api.py`, `tests/unit/test_dashboard_ui.py`; API detail smoke in `scripts/verify_release.sh`. | **Implemented and locally verified.** Revenue-at-risk is a finding-level sum, so one order appearing in multiple findings can contribute more than once. |
 | Active-finding deduplication and rerun refresh | `src/control_tower/exceptions/service.py::ExceptionService.detect` resolves active findings by domain identity, refreshes derived facts, and suppresses historical fingerprints only when appropriate. | `tests/unit/test_exception_service_lifecycle.py::test_active_rerun_updates_derived_fields_without_history_or_status_change`; `tests/integration/test_exception_postgres.py`; release gate detects twice and checks `created`/`updated`. | **Implemented; disposable-environment gate.** Deduplication is scoped to the defined issue identity and active lifecycle. |
@@ -67,8 +68,22 @@ Status vocabulary:
 
 ## Portfolio screenshot and demo checklist
 
-Do not add or claim screenshot files as part of the source tree. Capture only from a
-running local instance after the data and API checks below succeed.
+Only add reviewed portfolio screenshots to the source tree. Capture them from a
+running demo instance after the data and API checks below succeed, and keep all
+unreviewed captures outside the repository.
+
+### Final selected media
+
+The final release includes three reviewed dashboard captures under `docs/assets/`:
+
+- `control-tower-overview.jpg` — KPI summary, queue filters, and first queue rows.
+- `control-tower-exception-detail.jpg` — exception queue with selected finding detail.
+- `control-tower-lifecycle.jpg` — explainable finding detail and immutable lifecycle history.
+
+The captures were taken from the public read-only demo, contain synthetic operational
+data, and exclude browser chrome, terminals, cloud consoles, Telegram, credentials,
+and personal context. No suitable demo video was found in the supplied media, so no
+video link is included.
 
 ### Prerequisites and safe data
 
@@ -161,9 +176,9 @@ docker compose down --volumes
 rm -rf /tmp/control-tower-demo-bundle
 ```
 
-- [ ] Confirm `git status --short` contains no generated bundle, cache, coverage,
-  temporary, or screenshot artifact. Keep screenshots outside the repository unless
-  they are deliberately reviewed portfolio assets.
+- [ ] Confirm `git status --short` contains no generated bundle, cache, coverage, or
+  temporary artifact. Keep screenshots outside the repository unless they are
+  deliberately reviewed portfolio assets under `docs/assets/`.
 
 ## Final-review evidence and limitations
 

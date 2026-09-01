@@ -1,9 +1,9 @@
-# M07 deployment architecture
+# Deployment architecture
 
-This is the M07 delivery record for the current product boundary. The public demo is
+This is the deployment record for the current product boundary. The public demo is
 served by the existing Cloud Run deployment, with FastAPI, Streamlit, and Neon
 PostgreSQL; the repository retains the local topology below as its reproducible
-verification path. M07 did not change the business or API contracts.
+verification path. The deployment work did not change the business or API contracts.
 
 ```text
 Local PostgreSQL volume / deployed Neon PostgreSQL
@@ -50,9 +50,10 @@ provided by the current product.
 ## Current provider mapping
 
 The existing deployment maps the FastAPI API and Streamlit dashboard to Cloud Run and
-uses Neon PostgreSQL for persistence. Cloud Run service URLs, IAM, secrets, Neon
-connection details, and deployment manifests are external to this repository; no
-provider resource is provisioned or changed here. Alembic migration and deterministic
+uses Neon PostgreSQL for persistence. The public service entry points are documented
+in the repository README; IAM, secrets, Neon connection details, revision identifiers,
+and deployment manifests are external to this repository. No provider resource is
+provisioned or changed here. Alembic migration and deterministic
 bootstrap remain explicit release jobs rather than web startup behavior. The public
 demo is read-only through the server-side `PUBLIC_DEMO_READ_ONLY` boundary.
 
@@ -60,7 +61,7 @@ demo is read-only through the server-side `PUBLIC_DEMO_READ_ONLY` boundary.
 
 GitHub Actions in `.github/workflows/ci.yml` runs Ruff, unit tests, shell syntax,
 Compose validation, container builds/hardening, and a PostgreSQL integration job.
-The local M07 scripts provide the same delivery checks with disposable resources;
+The local deployment scripts provide the same delivery checks with disposable resources;
 Docker-dependent and database-dependent checks are not implied by AppTest or unit
 results when their prerequisites are unavailable.
 

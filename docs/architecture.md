@@ -107,7 +107,7 @@ nonblank reason is required for `RESOLVED` and `DISMISSED`. History is append-on
 through ORM and PostgreSQL protections, including bulk statement boundaries and
 truncate protection.
 
-The detection CLI (`python -m control_tower.exceptions`) requires `--as-of`, accepts
+The detection CLI (`.venv/bin/python -m control_tower.exceptions`) requires `--as-of`, accepts
 an optional `--database-url`, normalizes the instant to UTC, commits one detection
 run, and prints only JSON counters.
 

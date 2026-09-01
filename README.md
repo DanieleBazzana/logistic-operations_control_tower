@@ -1,5 +1,32 @@
 # Supply Chain Operations Control Tower
 
+> A production-grade portfolio demo that turns fragmented supply-chain signals into a prioritized, explainable exception queue for operations teams.
+
+[Live Dashboard](https://control-tower-dashboard-xo5wjavqmq-ey.a.run.app) · [API docs](https://control-tower-api-xo5wjavqmq-ey.a.run.app/docs) · [Portfolio copy](docs/portfolio-copy.md)
+
+![Operations Control Tower overview](docs/assets/control-tower-overview.jpg)
+
+**Public Demo · Read Only.** The deployed dashboard and API expose the operational
+read surface. Lifecycle mutations are available only in local/development
+environments and are blocked server-side in the public deployment.
+
+## Recruiter snapshot
+
+This project demonstrates an operations-oriented data product: synthetic OMS, WMS,
+ERP/procurement, and carrier signals are normalized into PostgreSQL, evaluated by
+deterministic exception rules, and exposed through a versioned FastAPI contract and
+Streamlit control-tower UI. Each finding carries severity, business impact, root
+cause, recommended action, and lifecycle history so an operator can move from signal
+to decision quickly.
+
+## Demo gallery
+
+The public demo is intentionally read-only and uses synthetic operational data.
+
+![Exception queue with operational detail](docs/assets/control-tower-exception-detail.jpg)
+
+![Exception detail and lifecycle history](docs/assets/control-tower-lifecycle.jpg)
+
 ## Business problem and solution
 
 Operations teams often have orders, warehouse inventory, procurement, and carrier
@@ -27,8 +54,9 @@ cloud credentials.
 - Streamlit, Pandas, and HTTPX
 - Pytest and Ruff
 
-For the product requirements, release evidence, and safe portfolio screenshot/demo
-checklist, see [docs/release-review.md](docs/release-review.md).
+For the product requirements, release evidence, and media-review record, see
+[docs/release-review.md](docs/release-review.md). Ready-to-reuse CV, LinkedIn,
+GitHub, and interview language is collected in [docs/portfolio-copy.md](docs/portfolio-copy.md).
 
 ## Local bootstrap
 
@@ -236,9 +264,11 @@ are removed during cleanup.
 
 The current product boundary is an existing Cloud Run deployment for the FastAPI API
 and Streamlit dashboard, backed by Neon PostgreSQL. The public demo sets
-`PUBLIC_DEMO_READ_ONLY=true`; no lifecycle write is available there. Deployment
-configuration, service URLs, IAM, secrets, and Neon connection details are external
-to this repository and are not asserted here.
+`PUBLIC_DEMO_READ_ONLY=true`; no lifecycle write is available there. The public
+entry points are the [dashboard](https://control-tower-dashboard-xo5wjavqmq-ey.a.run.app)
+and [API docs](https://control-tower-api-xo5wjavqmq-ey.a.run.app/docs). Deployment
+configuration, IAM, secrets, and Neon connection details remain external to this
+repository and are not asserted here.
 
 The local equivalent keeps production operations explicit and reversible. The API and
 Streamlit dashboard have independent non-root images, bind only to configured ports,
