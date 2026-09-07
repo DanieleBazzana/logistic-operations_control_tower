@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -26,6 +26,7 @@ dependencies = [
 dev = [
     "pytest>=9.0.3,<10.0",
     "ruff>=0.8,<1.0",
+    "pip-audit>=2.8,<3.0",
 ]
 
 [tool.setuptools]

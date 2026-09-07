@@ -52,7 +52,7 @@ cloud credentials.
 - SQLAlchemy 2, Alembic, and psycopg
 - FastAPI and Uvicorn
 - Streamlit, Pandas, and HTTPX
-- Pytest and Ruff
+- Pytest, Ruff, and pip-audit
 
 For the product requirements, release evidence, and media-review record, see
 [docs/release-review.md](docs/release-review.md). Ready-to-reuse CV, LinkedIn,
@@ -62,7 +62,7 @@ GitHub, and interview language is collected in [docs/portfolio-copy.md](docs/por
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --upgrade pip setuptools
 .venv/bin/python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
