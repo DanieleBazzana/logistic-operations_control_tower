@@ -110,6 +110,7 @@ class OlistAdapter:
         self, tables: dict[str, Iterable[dict[str, Any]]], *, sample_size: int | None = None
     ) -> AdapterResult:
         source_tables = {name: bounded_rows(rows, sample_size) for name, rows in tables.items()}
+        source_line_rows = {name: len(rows) for name, rows in source_tables.items()}
         orders = [normalize_external_row(row) for row in source_tables.get("orders", [])]
         payments = [normalize_external_row(row) for row in source_tables.get("payments", [])]
         customers = [normalize_external_row(row) for row in source_tables.get("customers", [])]
@@ -156,7 +157,9 @@ class OlistAdapter:
             provenance=tuple(_provenance("Olist", mapping) for mapping in mappings),
             mappings=mappings,
             unavailable=unavailable,
-            rows_read={name: len(rows) for name, rows in source_tables.items()},
+            rows_read=source_line_rows,
+            source_line_rows=source_line_rows,
+            adapted_orders={"oms/orders.csv": len(adapted)},
         )
 
     @staticmethod
@@ -242,6 +245,7 @@ class DataCoAdapter:
         self, tables: dict[str, Iterable[dict[str, Any]]], *, sample_size: int | None = None
     ) -> AdapterResult:
         source_tables = {name: bounded_rows(rows, sample_size) for name, rows in tables.items()}
+        source_line_rows = {name: len(rows) for name, rows in source_tables.items()}
         rows = [normalize_external_row(row) for row in source_tables.get("orders", [])]
         grouped: dict[str, dict[str, Any]] = {}
         totals: defaultdict[str, Decimal] = defaultdict(Decimal)
@@ -292,7 +296,9 @@ class DataCoAdapter:
             provenance=tuple(_provenance("DataCo", mapping) for mapping in mappings),
             mappings=mappings,
             unavailable=unavailable,
-            rows_read={name: len(rows) for name, rows in source_tables.items()},
+            rows_read=source_line_rows,
+            source_line_rows=source_line_rows,
+            adapted_orders={"oms/orders.csv": len(adapted)},
         )
 
     @staticmethod

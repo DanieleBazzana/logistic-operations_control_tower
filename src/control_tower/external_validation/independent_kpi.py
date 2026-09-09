@@ -5,16 +5,27 @@ This module deliberately does not import the API, KPI service, detection rules, 
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 
 def _value(row: dict[str, Any], *names: str) -> Any:
+    normalized: dict[str, Any] = {}
+    for key, value in row.items():
+        normalized.setdefault(_header_name(key), value)
     for name in names:
-        if name in row and row[name] not in (None, ""):
-            return row[name]
+        value = normalized.get(_header_name(name))
+        if value not in (None, ""):
+            return value
     return None
+
+
+def _header_name(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value)).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
 
 
 def _instant(value: Any) -> datetime | None:
@@ -72,10 +83,14 @@ def calculate_independent_kpis(
         row
         for row in rows
         if (
-            _instant(_value(row, "order_purchase_timestamp", "Order Date (DateOrders)"))
-            or datetime.min.replace(tzinfo=timezone.utc)
+            (
+                order_date := _instant(
+                    _value(row, "order_purchase_timestamp", "Order Date (DateOrders)")
+                )
+            )
+            is not None
+            and order_date <= instant
         )
-        <= instant
     ]
     statuses = []
     for row in processed:
@@ -100,7 +115,13 @@ def calculate_independent_kpis(
                 )
             )
         statuses.append((row, status))
-    fulfilled = [row for row, status in statuses if status == "FULFILLED"]
+    fulfilled = [
+        row
+        for row, status in statuses
+        if status == "FULFILLED"
+        and (fulfilled_at := _instant(_value(row, "order_delivered_customer_date"))) is not None
+        and fulfilled_at <= instant
+    ]
     sla_observations: list[bool] = []
     for row in fulfilled:
         delivered = _instant(_value(row, "order_delivered_customer_date"))

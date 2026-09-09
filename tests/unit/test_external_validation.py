@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from control_tower.external_validation import runner as runner_module
 from control_tower.external_validation.acquisition import load_manifest, read_local_tables
 from control_tower.external_validation.adapters import (
     DataCoAdapter,
@@ -269,7 +270,78 @@ def test_independent_kpi_sla_is_unavailable_without_promised_and_fulfilled_dates
         as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
     )
 
+    assert kpis["fulfilled_orders"] == 0
+    assert kpis["sla_performance_pct"] is None
+
+
+def test_independent_kpi_accepts_observed_lowercase_dataco_date_header() -> None:
+    kpis = calculate_independent_kpis(
+        "dataco",
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "order date (DateOrders)": "01/01/2018 10:30",
+                    "order_delivered_customer_date": "01/01/2018 12:00",
+                }
+            ]
+        },
+        as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert kpis["orders_processed"] == 1
     assert kpis["fulfilled_orders"] == 1
+
+
+def test_independent_kpi_excludes_missing_or_bad_order_dates() -> None:
+    kpis = calculate_independent_kpis(
+        "dataco",
+        {
+            "orders": [
+                {
+                    "Order Id": "missing",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "",
+                },
+                {
+                    "Order Id": "bad",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "not-a-date",
+                },
+                {
+                    "Order Id": "valid",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018",
+                    "order_delivered_customer_date": "01/01/2018",
+                },
+            ]
+        },
+        as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert kpis["orders_processed"] == 1
+    assert kpis["fulfilled_orders"] == 1
+
+
+def test_independent_kpi_excludes_fulfillment_after_as_of() -> None:
+    kpis = calculate_independent_kpis(
+        "dataco",
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018",
+                    "order_delivered_customer_date": "01/03/2018",
+                }
+            ]
+        },
+        as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert kpis["orders_processed"] == 1
+    assert kpis["fulfilled_orders"] == 0
     assert kpis["sla_performance_pct"] is None
 
 
@@ -287,12 +359,58 @@ def test_validation_evidence_is_structured_and_explicit_about_non_comparability(
 
     assert evidence["dataset"] == "olist"
     assert evidence["sampling"]["max_rows"] == 10
-    assert evidence["counts"]["rejected"] == 2
+    assert evidence["counts"]["rejection_errors"] == 2
     assert evidence["coherence"]["status"] == "NOT_COMPARABLE"
     assert "supplier" in evidence["unavailable_domains"]
 
 
-def test_runner_writes_local_evidence_without_api_or_raw_data(tmp_path) -> None:
+def test_validation_evidence_distinguishes_order_counts_from_rejection_errors() -> None:
+    adapted = DataCoAdapter().adapt(
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018",
+                    "Sales": "99.00",
+                }
+            ]
+        }
+    )
+    validated = validate_adapted(adapted)
+
+    evidence = build_validation_evidence(
+        dataset="dataco",
+        role="secondary",
+        sample_size=None,
+        rows_read=adapted.rows_read,
+        source_line_rows={"oms/orders.csv": 1},
+        adapted_orders={"oms/orders.csv": 1},
+        validated=validated,
+        unavailable=[],
+        kpis={"open_exceptions": None},
+        queue_counts={},
+    )
+
+    assert evidence["counts"] == {
+        "source_line_rows": 1,
+        "adapted_orders": 1,
+        "accepted_orders": 0,
+        "rejected_orders": 1,
+        "rejection_errors": 4,
+        "duplicate_identical": 0,
+    }
+    assert evidence["artifacts"]["oms/orders.csv"] == {
+        "source_line_rows": 1,
+        "adapted_orders": 1,
+        "accepted_orders": 0,
+        "rejected_orders": 1,
+        "rejection_errors": 4,
+        "duplicate_identical": 0,
+    }
+
+
+def test_runner_writes_local_evidence_without_api_or_raw_data(tmp_path, monkeypatch) -> None:
     csv_path = tmp_path / "DataCoSupplyChainDataset.csv"
     csv_path.write_bytes(
         (
@@ -301,6 +419,14 @@ def test_runner_writes_local_evidence_without_api_or_raw_data(tmp_path) -> None:
         ).encode("latin-1")
     )
     output_path = tmp_path / "evidence.json"
+    manifest = load_manifest("dataco")
+    manifest["verification"] = {
+        "status": "not_verified",
+        "filename": "DataCoSupplyChainDataset.csv",
+        "encoding": "latin-1",
+        "sha256": None,
+    }
+    monkeypatch.setattr(runner_module, "load_manifest", lambda dataset: manifest)
 
     evidence = run_validation(
         "dataco",
@@ -314,4 +440,39 @@ def test_runner_writes_local_evidence_without_api_or_raw_data(tmp_path) -> None:
     assert evidence["api_called"] is False
     assert evidence["raw_data_committed"] is False
     assert evidence["sampling"]["max_rows"] == 1
+    assert evidence["manifest_provenance"] == {
+        "source_version": "5",
+        "filename": "DataCoSupplyChainDataset.csv",
+        "encoding": "latin-1",
+        "sha256": None,
+        "status": "not_verified",
+    }
     assert output_path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_runner_rejects_declared_checksum_mismatch_before_parsing(tmp_path) -> None:
+    (tmp_path / "DataCoSupplyChainDataset.csv").write_bytes(b"not-the-committed-dataset")
+
+    try:
+        run_validation(
+            "dataco",
+            tmp_path,
+            as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+        )
+    except ValueError as error:
+        assert "SHA-256 mismatch" in str(error)
+    else:
+        raise AssertionError("declared checksum mismatch was not rejected")
+
+
+def test_runner_rejects_missing_declared_checksum_file_before_parsing(tmp_path) -> None:
+    try:
+        run_validation(
+            "dataco",
+            tmp_path,
+            as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+        )
+    except FileNotFoundError as error:
+        assert "declared file is missing" in str(error)
+    else:
+        raise AssertionError("missing declared file was not rejected")

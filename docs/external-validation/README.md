@@ -11,7 +11,9 @@ service, dashboard, bootstrap, or M07.4 files.
 - `manifests/dataco.json` is secondary only: Mendeley Data DOI record version 5,
   CC BY 4.0. Whether the dataset is observed or synthetic remains unclear and is
   preserved as a caveat. The verified local file uses `latin-1` and has the manifest's
-  recorded SHA-256 checksum; the raw file remains outside the repository.
+  recorded SHA-256 checksum; the raw file remains outside the repository. The runner
+  hashes the declared file before CSV parsing and fails on a missing file or checksum
+  mismatch, so evidence is never emitted for unverified bytes.
 - `manifests/olist.json` remains primary, but its Kaggle download was blocked by a
   login requirement in the verification environment. No Olist checksum or profiling
   count is asserted.
@@ -34,13 +36,21 @@ prefix sample:
 ```
 
 Use `dataco` with the DataCo manifest filename for the secondary comparison. The JSON
-output records row counts, accepted/rejected/identical-duplicate counts, mappings,
+output records `source_line_rows`, `adapted_orders`, `accepted_orders`,
+`rejected_orders`, `rejection_errors`, and `duplicate_identical` separately at both
+the aggregate and artifact levels. `rejected_orders` counts unique rejected orders;
+`rejection_errors` counts validation errors, so multiple missing fields on one order
+are not misreported as multiple rejected orders. It also records committed manifest
+provenance (`source_version`, filename, encoding, SHA-256, and verification status),
 `SOURCE -> TRANSFORMATION -> OUTPUT` provenance, unavailable domains, independent
 order-side KPIs, and KPI/queue coherence. It also records `api_called: false` and
 `raw_data_committed: false`.
 
 The DataCo adapter groups source line rows by `Order Id` at order level and retains
-only the first source row for the independent order-side KPI calculation. DataCo's
+only the first source row for the independent order-side KPI calculation. The
+independent point-in-time KPI path requires a valid order date at or before `as-of`
+and only counts fulfilled orders with a valid fulfillment timestamp at or before
+`as-of`; missing or invalid timestamps are not fabricated. DataCo's
 `source_warehouse_id`, `promised_at`, and `currency` remain unavailable and therefore
 continue to be rejected by the existing ingestion contract; no mapping is invented.
 When both promised and fulfilled timestamps are unavailable, SLA is reported as

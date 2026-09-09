@@ -7,7 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from control_tower.external_validation.acquisition import load_manifest, read_local_tables
+from control_tower.external_validation.acquisition import (
+    load_manifest,
+    read_local_tables,
+    verify_declared_files,
+)
 from control_tower.external_validation.adapters import DataCoAdapter, OlistAdapter
 from control_tower.external_validation.evidence import build_validation_evidence
 from control_tower.external_validation.independent_kpi import calculate_independent_kpis
@@ -24,11 +28,17 @@ def run_validation(
     """Read only user-supplied CSVs and return JSON-compatible evidence."""
 
     manifest = load_manifest(dataset)
+    acquisition = manifest["acquisition"]
+    verify_declared_files(
+        input_dir,
+        acquisition["files"],
+        manifest.get("verification", {}),
+    )
     tables = read_local_tables(
         input_dir,
-        manifest["acquisition"]["files"],
+        acquisition["files"],
         sample_size=sample_size,
-        encoding=manifest["acquisition"].get("encoding", "utf-8"),
+        encoding=acquisition.get("encoding", "utf-8"),
     )
     adapter = OlistAdapter() if dataset == "olist" else DataCoAdapter()
     adapted = adapter.adapt(tables)
@@ -39,6 +49,8 @@ def run_validation(
         role=manifest["role"],
         sample_size=sample_size,
         rows_read=adapted.rows_read,
+        source_line_rows={"oms/orders.csv": adapted.source_line_rows.get("orders", 0)},
+        adapted_orders=adapted.adapted_orders,
         validated=validated,
         unavailable=kpis["unavailable"] + [mapping.output_field for mapping in adapted.unavailable],
         kpis=kpis,
@@ -52,6 +64,15 @@ def run_validation(
             for item in adapted.provenance
         ],
         mappings=adapted.mappings,
+        manifest_provenance={
+            "source_version": manifest.get("source_version"),
+            "filename": manifest.get("verification", {}).get("filename"),
+            "encoding": manifest.get("verification", {}).get(
+                "encoding", acquisition.get("encoding")
+            ),
+            "sha256": manifest.get("verification", {}).get("sha256"),
+            "status": manifest.get("verification", {}).get("status"),
+        },
     )
 
 

@@ -35,6 +35,8 @@ class AdapterResult:
     mappings: tuple[FieldMapping, ...]
     unavailable: tuple[FieldMapping, ...]
     rows_read: dict[str, int] = field(default_factory=dict)
+    source_line_rows: dict[str, int] = field(default_factory=dict)
+    adapted_orders: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
