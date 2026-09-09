@@ -47,6 +47,14 @@ def test_normalization_is_deterministic_and_sampling_is_bounded() -> None:
     assert bounded_rows(rows, 2) == [{"id": "0"}, {"id": "1"}]
 
 
+def test_bounded_rows_does_not_consume_after_requested_prefix() -> None:
+    def rows():
+        yield {"id": "0"}
+        raise AssertionError("bounded sampling consumed a row beyond the prefix")
+
+    assert bounded_rows(rows(), 1) == [{"id": "0"}]
+
+
 def test_local_table_reader_defaults_to_utf8_and_accepts_manifest_encoding(tmp_path) -> None:
     utf8_path = tmp_path / "utf8.csv"
     utf8_path.write_text("name\nMünchen\n", encoding="utf-8")
@@ -360,6 +368,8 @@ def test_validation_evidence_is_structured_and_explicit_about_non_comparability(
     assert evidence["dataset"] == "olist"
     assert evidence["sampling"]["max_rows"] == 10
     assert evidence["counts"]["rejection_errors"] == 2
+    assert evidence["counts"]["source_line_rows"] == 2
+    assert evidence["artifacts"]["oms/orders.csv"]["source_line_rows"] == 2
     assert evidence["coherence"]["status"] == "NOT_COMPARABLE"
     assert "supplier" in evidence["unavailable_domains"]
 

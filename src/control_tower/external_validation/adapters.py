@@ -7,6 +7,7 @@ import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from itertools import islice
 from typing import Any, Iterable
 
 from control_tower.external_validation.contracts import (
@@ -34,8 +35,8 @@ def bounded_rows(rows: Iterable[dict[str, Any]], limit: int | None) -> list[dict
 
     if limit is not None and limit < 0:
         raise ValueError("sample_size must be non-negative")
-    values = [dict(row) for row in rows]
-    return values if limit is None else values[:limit]
+    bounded = rows if limit is None else islice(rows, limit)
+    return [dict(row) for row in bounded]
 
 
 def _timestamp(value: Any) -> str | None:

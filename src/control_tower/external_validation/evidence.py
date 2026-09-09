@@ -93,7 +93,9 @@ def build_validation_evidence(
     """Build JSON-serializable evidence without contacting the API or database."""
 
     artifact_counts: dict[str, dict[str, int]] = {}
-    source_lines_by_artifact = dict(source_line_rows or rows_read)
+    source_lines_by_artifact = dict(rows_read if source_line_rows is None else source_line_rows)
+    if source_line_rows is None and "orders" in source_lines_by_artifact:
+        source_lines_by_artifact["oms/orders.csv"] = source_lines_by_artifact.pop("orders")
     adapted_orders_by_artifact = dict(adapted_orders or {})
     source_line_total = sum(source_lines_by_artifact.values())
     adapted_order_total = sum(adapted_orders_by_artifact.values())
