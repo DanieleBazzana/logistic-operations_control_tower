@@ -47,6 +47,37 @@ export API_PORT="${API_PORT:-8000}" DASHBOARD_PORT="${DASHBOARD_PORT:-8501}"
 "${COMPOSE[@]}" run --rm migrate >"$RUN_DIR/migrate.log" 2>&1 || fail "migration failed"
 "${COMPOSE[@]}" run --rm bootstrap >"$RUN_DIR/bootstrap-one.log" 2>&1 || fail "bootstrap failed"
 "${COMPOSE[@]}" run --rm bootstrap >"$RUN_DIR/bootstrap-two.log" 2>&1 || fail "repeat bootstrap failed"
+"$ROOT_DIR/.venv/bin/python" - "$RUN_DIR/bootstrap-one.log" "$RUN_DIR/bootstrap-two.log" <<'PY' || fail "clean bootstrap counters did not match"
+import json
+import sys
+
+expected = (
+    {"detections": 514, "created": 514, "updated": 0, "skipped": 0},
+    {"detections": 514, "created": 0, "updated": 512, "skipped": 2},
+)
+
+
+def bootstrap_result(path):
+    with open(path, encoding="utf-8") as stream:
+        lines = stream.readlines()
+    for line in reversed(lines):
+        try:
+            result = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(result, dict) and all(key in result for key in expected[0]):
+            return result
+    raise SystemExit(f"{path} did not contain bootstrap JSON")
+
+
+for path, expected_counters in zip(sys.argv[1:], expected, strict=True):
+    result = bootstrap_result(path)
+    observed = {key: result[key] for key in expected_counters}
+    if observed != expected_counters:
+        raise SystemExit(
+            f"{path} counters expected {expected_counters}, observed {observed}"
+        )
+PY
 
 export PUBLIC_DEMO_READ_ONLY=true
 "${COMPOSE[@]}" up -d api dashboard >"$RUN_DIR/services.log" 2>&1 || fail "API/dashboard startup failed"

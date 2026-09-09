@@ -23,6 +23,21 @@ disposable backup/restore schema-and-data check. These commands complement
 evidence is non-blocking when Docker/Compose is unavailable and must be reported as
 unrun, not inferred from unit tests.
 
+### Detection counter semantics
+
+Bootstrap detection counters count evaluated findings, not newly created rows. On a clean
+canonical dataset using the generator defaults (`product_count=200`, `warehouse_count=3`,
+`order_count=1200`), the six rules produce 514 findings: `detections=514, created=514,
+updated=0, skipped=0` on the first run, followed by `detections=514, created=0,
+updated=512, skipped=2` on the second run. The 512 active and two terminal lifecycle
+records explain the rerun split. These exact values apply only to the fresh disposable
+Compose path; live or otherwise pre-populated runs can legitimately report different
+observed counters, including zero. Reduced probes may produce smaller counts and are not
+the canonical Compose contract.
+
+Rerun safety is established from the persisted record count, lifecycle distribution,
+record IDs and manual state, and append-only history—not from creation counters alone.
+
 The live deployment is outside these local scripts: Cloud Run hosts the API and
 dashboard boundary, Neon PostgreSQL is the deployed persistence boundary, and
 `PUBLIC_DEMO_READ_ONLY=true` disables lifecycle writes in the public demo. The
