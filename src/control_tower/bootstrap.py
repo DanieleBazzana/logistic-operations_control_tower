@@ -8,10 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from control_tower.config import Settings
 from control_tower.db import create_db_engine, create_session_factory
+from control_tower.enums import ExceptionStatus, ExceptionType
+from control_tower.exceptions.lifecycle import transition_exception
 from control_tower.exceptions.service import ExceptionService
 from control_tower.ingestion.loader import ingest
+from control_tower.models import ExceptionRecord
 from control_tower.synthetic.generator import generate
 
 
@@ -20,6 +25,52 @@ def _as_of(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("as_of must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
+    """Apply the fixed six-record lifecycle sample without duplicating history."""
+
+    lifecycle_paths = {
+        ExceptionType.SLA_BREACH_RISK: (),
+        ExceptionType.INVENTORY_SHORTAGE: (),
+        ExceptionType.STOCKOUT_RISK: (ExceptionStatus.ACKNOWLEDGED,),
+        ExceptionType.INVENTORY_MISMATCH: (
+            ExceptionStatus.ACKNOWLEDGED,
+            ExceptionStatus.IN_PROGRESS,
+        ),
+        ExceptionType.SUPPLIER_DELAY: (
+            ExceptionStatus.ACKNOWLEDGED,
+            ExceptionStatus.IN_PROGRESS,
+            ExceptionStatus.RESOLVED,
+        ),
+        ExceptionType.SHIPMENT_DELAY: (ExceptionStatus.DISMISSED,),
+    }
+    records = list(
+        session.scalars(
+            select(ExceptionRecord).where(
+                ExceptionRecord.exception_type.in_(lifecycle_paths)
+            )
+        )
+    )
+    records_by_type = {record.exception_type: record for record in records}
+    if len(records) != len(lifecycle_paths) or set(records_by_type) != set(lifecycle_paths):
+        return
+    if any(record.status != ExceptionStatus.OPEN for record in records_by_type.values()):
+        return
+
+    for exception_type, path in lifecycle_paths.items():
+        record = records_by_type[exception_type]
+        for target in path:
+            transition_exception(
+                session,
+                record.id,
+                target,
+                actor="bootstrap",
+                reason="deterministic lifecycle sample"
+                if target in (ExceptionStatus.RESOLVED, ExceptionStatus.DISMISSED)
+                else None,
+                changed_at=changed_at,
+            )
 
 
 def bootstrap(
@@ -38,6 +89,7 @@ def bootstrap(
     try:
         with create_session_factory(engine=engine)() as session:
             detection = ExceptionService(session, configured).detect(as_of)
+            _seed_lifecycle_sample(session, changed_at=as_of)
             session.commit()
     finally:
         engine.dispose()

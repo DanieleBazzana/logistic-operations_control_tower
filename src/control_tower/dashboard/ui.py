@@ -36,6 +36,12 @@ EXCEPTION_TYPES = (
 )
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 STATUSES = ("OPEN", "ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED", "DISMISSED")
+ACTIVE_STATUSES = ("OPEN", "ACKNOWLEDGED", "IN_PROGRESS")
+FACET_DEFINITIONS = (
+    ("status", STATUSES, "Lifecycle status"),
+    ("exception_type", EXCEPTION_TYPES, "Exception type"),
+    ("severity", SEVERITIES, "Severity"),
+)
 LEGAL_TRANSITIONS = {
     "OPEN": ("ACKNOWLEDGED", "DISMISSED"),
     "ACKNOWLEDGED": ("IN_PROGRESS", "DISMISSED"),
@@ -134,6 +140,26 @@ def build_exception_filters(
     return filters
 
 
+def faceted_exception_counts(
+    client: Any, filters: Mapping[str, Any]
+) -> dict[str, dict[str, int]]:
+    """Read contextual facet counts from the existing paginated API total."""
+
+    counts: dict[str, dict[str, int]] = {}
+    for dimension, values, _label in FACET_DEFINITIONS:
+        contextual = {key: value for key, value in filters.items() if key != dimension}
+        counts[dimension] = {}
+        for value in values:
+            query = {**contextual, dimension: [value]}
+            body = _cache_get(
+                "facet",
+                query,
+                lambda query=query: client.list_exceptions(page=1, page_size=1, filters=query),
+            )
+            counts[dimension][value] = int(body.get("total", 0))
+    return counts
+
+
 def build_purchase_order_filters(
     supplier_id: str = "", warehouse_id: str = ""
 ) -> dict[str, str]:
@@ -206,25 +232,6 @@ def format_confidence(value: Any) -> str:
         return str(value)
     percent = confidence.quantize(Decimal("0.1"))
     return f"{percent:.1f}".rstrip("0").rstrip(".") + "%"
-
-
-def queue_snapshot_as_of(body: Mapping[str, Any]) -> datetime | None:
-    """Find the deterministic detection instant carried by queue rows."""
-
-    # The queue response has no response-level ``as_of``; ``detected_at`` is the
-    # existing row field written from the detection run instant, shared by the
-    # findings in a deterministic dataset.
-    candidates: list[datetime] = []
-    for row in body.get("items", []):
-        value = row.get("detected_at")
-        if value:
-            try:
-                timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if timestamp.tzinfo is not None and timestamp.utcoffset() is not None:
-                candidates.append(timestamp.astimezone(timezone.utc))
-    return max(candidates) if candidates else None
 
 
 def _format_queue_rows(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
@@ -325,20 +332,31 @@ def _format_kpi(value: Any, kind: str) -> str:
 def _sidebar_filters() -> tuple[dict[str, Any], str, int]:
     st.sidebar.header("Queue filters")
     exception_types = st.sidebar.multiselect(
-        "Exception type", EXCEPTION_TYPES, format_func=format_enum
+        "Exception type", EXCEPTION_TYPES, format_func=format_enum, key="filter_exception_type"
     )
-    severities = st.sidebar.multiselect("Severity", SEVERITIES, format_func=format_enum)
+    severities = st.sidebar.multiselect(
+        "Severity", SEVERITIES, format_func=format_enum, key="filter_severity"
+    )
     statuses = st.sidebar.multiselect(
         "Lifecycle status",
         STATUSES,
-        default=["OPEN", "ACKNOWLEDGED", "IN_PROGRESS"],
+        default=list(ACTIVE_STATUSES),
         format_func=format_enum,
+        key="filter_status",
     )
-    warehouse_id = st.sidebar.text_input("Warehouse ID", help="Filter exceptions to one warehouse.")
-    entity_type = st.sidebar.text_input("Entity type")
-    entity_id = st.sidebar.text_input("Entity ID")
-    supplier_id = st.sidebar.text_input("Supplier ID", help="Optional purchase-order context.")
-    page_size = st.sidebar.selectbox("Rows per page", (25, 50, 100), index=0)
+    warehouse_id = st.sidebar.text_input(
+        "Warehouse ID", help="Filter exceptions to one warehouse.", key="filter_warehouse_id"
+    )
+    entity_type = st.sidebar.text_input("Entity type", key="filter_entity_type")
+    entity_id = st.sidebar.text_input("Entity ID", key="filter_entity_id")
+    supplier_id = st.sidebar.text_input(
+        "Supplier ID", help="Optional purchase-order context.", key="filter_supplier_id"
+    )
+    page_size = st.sidebar.selectbox(
+        "Rows per page", (25, 50, 100), index=0, key="filter_page_size"
+    )
+    st.sidebar.button("Reset filters", on_click=_reset_filters)
+    st.sidebar.button("Show active queue", on_click=_show_active_queue)
     filters = build_exception_filters(
         exception_types=exception_types,
         severities=severities,
@@ -349,6 +367,25 @@ def _sidebar_filters() -> tuple[dict[str, Any], str, int]:
     )
     filters["_warehouse_id"] = warehouse_id
     return filters, supplier_id.strip(), page_size
+
+
+def _reset_filters() -> None:
+    st.session_state["filter_exception_type"] = []
+    st.session_state["filter_severity"] = []
+    st.session_state["filter_status"] = list(ACTIVE_STATUSES)
+    for key in (
+        "filter_warehouse_id",
+        "filter_entity_type",
+        "filter_entity_id",
+        "filter_supplier_id",
+    ):
+        st.session_state[key] = ""
+    st.session_state["queue_page"] = 1
+    st.session_state["filter_page_size"] = 25
+
+
+def _show_active_queue() -> None:
+    _reset_filters()
 
 
 def render_kpis(summary: Mapping[str, Any]) -> None:
@@ -451,7 +488,7 @@ def render_dashboard(client) -> None:
     warehouse_id = str(filters.pop("_warehouse_id", ""))
 
     st.header("Exception queue")
-    page = st.number_input("Queue page number", min_value=1, value=1, step=1)
+    page = st.number_input("Queue page number", min_value=1, value=1, step=1, key="queue_page")
     with st.spinner("Loading exception queue…"):
         try:
             body = _cache_get(
@@ -463,24 +500,36 @@ def render_dashboard(client) -> None:
             st.error(f"Unable to load the exception queue. {error}")
             return
     rows = body.get("items", [])
-    snapshot_as_of = queue_snapshot_as_of(body)
+    queue_evaluated_at = datetime.now(timezone.utc)
 
     with st.spinner("Loading operational summary…"):
         try:
-            summary_params = {"as_of": snapshot_as_of} if snapshot_as_of else {}
             summary = _cache_get(
-                "summary", summary_params, lambda: client.summary(**summary_params)
+                "summary", {}, lambda: client.summary()
             )
         except DashboardAPIError as error:
             st.error(f"Unable to load the operational summary. {error}")
             return
     render_kpis(summary)
-    st.caption(f"Snapshot: {format_timestamp(summary.get('as_of'))}")
+    st.caption(f"KPI snapshot: {format_timestamp(summary.get('as_of'))}")
+    st.caption(f"Queue evaluation: {format_timestamp(queue_evaluated_at)}")
+    try:
+        facet_counts = faceted_exception_counts(client, filters)
+        for dimension, _values, label in FACET_DEFINITIONS:
+            st.caption(
+                f"{label}: "
+                + " · ".join(
+                    f"{format_enum(value)} {facet_counts[dimension][value]}"
+                    for value in facet_counts[dimension]
+                )
+            )
+    except DashboardAPIError as error:
+        st.error(f"Unable to load filter counts. {error}")
 
     total = int(body.get("total", len(rows)))
     st.caption(f"Page {int(page)} · {total} exceptions match the current filters")
     if not rows:
-        st.info("No exceptions match the current filters.")
+        st.info("No exceptions match this combination of filters.")
     else:
         frame = _format_queue_rows(rows)
         st.dataframe(frame, hide_index=True, use_container_width=True)

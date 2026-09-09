@@ -9,6 +9,7 @@ from control_tower.dashboard.ui import (
     build_exception_filters,
     build_purchase_order_filters,
     exceptions_to_csv,
+    faceted_exception_counts,
     format_confidence,
     format_currency,
     format_enum,
@@ -139,13 +140,13 @@ def _disable_public_demo(monkeypatch):
     monkeypatch.delenv("PUBLIC_DEMO_READ_ONLY", raising=False)
 
 
-def test_dashboard_requests_kpis_at_the_queue_snapshot():
+def test_dashboard_requests_kpis_independently_from_queue_snapshot():
     client = FakeClient()
 
     test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
 
     assert test_app.exception == []
-    assert client.summary_calls == [{"as_of": QUEUE_AS_OF}]
+    assert client.summary_calls == [{}]
 
 
 def test_dashboard_keeps_queue_snapshot_when_filters_change():
@@ -157,7 +158,139 @@ def test_dashboard_keeps_queue_snapshot_when_filters_change():
 
     assert test_app.exception == []
     assert client.list_calls[-1]["filters"]["exception_type"] == ["SLA_BREACH_RISK"]
-    assert client.summary_calls == [{"as_of": QUEUE_AS_OF}]
+    assert client.summary_calls == [{}]
+
+
+def test_queue_actions_reset_all_filters_and_pagination():
+    client = FakeClient()
+    test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
+
+    test_app.sidebar.multiselect[0].set_value(["SLA_BREACH_RISK"])
+    test_app.sidebar.multiselect[1].set_value(["HIGH"])
+    test_app.sidebar.multiselect[2].set_value(["RESOLVED"])
+    for index, value in enumerate(("W9", "shipment", "S9", "SUP9")):
+        test_app.sidebar.text_input[index].set_value(value)
+    test_app.sidebar.selectbox[0].set_value(100)
+    test_app.number_input[0].set_value(4)
+    test_app.run()
+
+    test_app.sidebar.button[0].click().run()
+    assert test_app.session_state["filter_status"] == ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS"]
+    assert test_app.session_state["filter_exception_type"] == []
+    assert test_app.session_state["filter_severity"] == []
+    assert all(
+        test_app.session_state[key] == ""
+        for key in (
+            "filter_warehouse_id",
+            "filter_entity_type",
+            "filter_entity_id",
+            "filter_supplier_id",
+        )
+    )
+    assert test_app.session_state["queue_page"] == 1
+    assert test_app.session_state["filter_page_size"] == 25
+
+    test_app.sidebar.multiselect[0].set_value(["SHIPMENT_DELAY"])
+    test_app.sidebar.multiselect[1].set_value(["CRITICAL"])
+    test_app.sidebar.multiselect[2].set_value(["DISMISSED"])
+    for index, value in enumerate(("W8", "order", "O8", "SUP8")):
+        test_app.sidebar.text_input[index].set_value(value)
+    test_app.sidebar.selectbox[0].set_value(100)
+    test_app.number_input[0].set_value(3)
+    test_app.run()
+    test_app.sidebar.button[1].click().run()
+    assert test_app.session_state["filter_status"] == ["OPEN", "ACKNOWLEDGED", "IN_PROGRESS"]
+    assert test_app.session_state["filter_exception_type"] == []
+    assert test_app.session_state["filter_severity"] == []
+    assert all(
+        test_app.session_state[key] == ""
+        for key in (
+            "filter_warehouse_id",
+            "filter_entity_type",
+            "filter_entity_id",
+            "filter_supplier_id",
+        )
+    )
+    assert test_app.session_state["queue_page"] == 1
+    assert test_app.session_state["filter_page_size"] == 25
+
+
+def test_faceted_counts_use_total_from_contextual_exception_queries():
+    import streamlit as st
+
+    st.session_state.clear()
+
+    class FacetClient:
+        def __init__(self):
+            self.calls = []
+
+        def list_exceptions(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"items": [], "total": len(kwargs["filters"].get("status", [])) + 2}
+
+    client = FacetClient()
+    counts = faceted_exception_counts(
+        client,
+        {"status": ["OPEN"], "severity": ["HIGH"], "exception_type": ["SLA_BREACH_RISK"]},
+    )
+
+    assert set(counts) == {"status", "exception_type", "severity"}
+    assert set(counts["status"]) == {
+        "OPEN",
+        "ACKNOWLEDGED",
+        "IN_PROGRESS",
+        "RESOLVED",
+        "DISMISSED",
+    }
+    assert set(counts["exception_type"]) == {
+        "SLA_BREACH_RISK",
+        "INVENTORY_SHORTAGE",
+        "STOCKOUT_RISK",
+        "INVENTORY_MISMATCH",
+        "SUPPLIER_DELAY",
+        "SHIPMENT_DELAY",
+    }
+    assert set(counts["severity"]) == {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+    assert all(value == 3 for group in counts.values() for value in group.values())
+    assert client.calls[0] == {
+        "page": 1,
+        "page_size": 1,
+        "filters": {
+            "severity": ["HIGH"],
+            "exception_type": ["SLA_BREACH_RISK"],
+            "status": ["OPEN"],
+        },
+    }
+    assert any(
+        call["filters"] == {
+            "status": ["OPEN"],
+            "severity": ["HIGH"],
+            "exception_type": ["INVENTORY_SHORTAGE"],
+        }
+        for call in client.calls
+    )
+    assert any(
+        call["filters"] == {
+            "status": ["OPEN"],
+            "exception_type": ["SLA_BREACH_RISK"],
+            "severity": ["CRITICAL"],
+        }
+        for call in client.calls
+    )
+
+
+def test_dashboard_empty_state_offers_exact_message_and_queue_actions():
+    class EmptyClient(FakeClient):
+        def list_exceptions(self, **kwargs):
+            self.list_calls.append(kwargs)
+            return {"items": [], "page": 1, "page_size": 25, "total": 0}
+
+    test_app = AppTest.from_function(_run_dashboard, args=(EmptyClient(),)).run()
+
+    assert any(
+        item.value == "No exceptions match this combination of filters." for item in test_app.info
+    )
+    assert {item.label for item in test_app.button} >= {"Reset filters", "Show active queue"}
 
 
 def _run_dashboard(client):
@@ -174,6 +307,13 @@ def test_dashboard_renders_kpis_queue_and_supplier_context_with_fake_client():
     assert any(item == "SLA breach risk" for item in test_app.dataframe[0].value["Exception type"])
     assert any("Exception queue" in item.value for item in test_app.header)
     assert any("**Operational status:** Open" in item.value for item in test_app.markdown)
+    captions = [item.value for item in test_app.caption]
+    assert any(item.startswith("KPI snapshot: ") for item in captions)
+    assert any(item.startswith("Queue evaluation: ") for item in captions)
+    assert not any("Queue evaluation: 2025-03-01 12:00 UTC" == item for item in captions)
+    assert any(item.startswith("Lifecycle status: ") for item in captions)
+    assert any(item.startswith("Exception type: ") for item in captions)
+    assert any(item.startswith("Severity: ") for item in captions)
 
 
 def _run_exception_detail(client):

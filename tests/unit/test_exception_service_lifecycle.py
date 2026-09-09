@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import delete, event, func, select, update
 from tests.unit.test_exception_rules import AS_OF, session_with_fixture
 
+from control_tower.bootstrap import _seed_lifecycle_sample
 from control_tower.config import Settings
 from control_tower.enums import ExceptionStatus, ExceptionType
 from control_tower.exceptions.lifecycle import InvalidTransition, transition_exception
@@ -38,6 +39,106 @@ def test_detection_persists_one_initial_history_row_per_new_exception() -> None:
     assert {row.exception_type for row in session.scalars(select(ExceptionRecord))} == set(
         ExceptionType
     )
+
+
+def test_bootstrap_lifecycle_sample_is_deterministic_and_idempotent() -> None:
+    session = session_with_fixture()
+    ExceptionService(session).detect(AS_OF)
+    session.commit()
+
+    _seed_lifecycle_sample(session, changed_at=AS_OF)
+    session.commit()
+
+    expected_statuses = {
+        ExceptionType.SLA_BREACH_RISK: ExceptionStatus.OPEN,
+        ExceptionType.INVENTORY_SHORTAGE: ExceptionStatus.OPEN,
+        ExceptionType.STOCKOUT_RISK: ExceptionStatus.ACKNOWLEDGED,
+        ExceptionType.INVENTORY_MISMATCH: ExceptionStatus.IN_PROGRESS,
+        ExceptionType.SUPPLIER_DELAY: ExceptionStatus.RESOLVED,
+        ExceptionType.SHIPMENT_DELAY: ExceptionStatus.DISMISSED,
+    }
+    assert {
+        record.exception_type: record.status
+        for record in session.scalars(select(ExceptionRecord))
+    } == expected_statuses
+    assert {
+        status: session.scalar(
+            select(func.count())
+            .select_from(ExceptionRecord)
+            .where(ExceptionRecord.status == status)
+        )
+        for status in ExceptionStatus
+    } == {
+        ExceptionStatus.OPEN: 2,
+        ExceptionStatus.ACKNOWLEDGED: 1,
+        ExceptionStatus.IN_PROGRESS: 1,
+        ExceptionStatus.RESOLVED: 1,
+        ExceptionStatus.DISMISSED: 1,
+    }
+    history_count = session.scalar(select(func.count()).select_from(ExceptionHistory))
+
+    _seed_lifecycle_sample(session, changed_at=AS_OF)
+    session.commit()
+
+    assert session.scalar(select(func.count()).select_from(ExceptionHistory)) == history_count
+
+
+def test_bootstrap_lifecycle_sample_does_not_seed_incomplete_or_duplicate_types() -> None:
+    session = session_with_fixture()
+    ExceptionService(session).detect(AS_OF)
+    session.commit()
+    record = session.scalar(
+        select(ExceptionRecord).where(
+            ExceptionRecord.exception_type == ExceptionType.SHIPMENT_DELAY
+        )
+    )
+    assert record is not None
+    record.exception_type = ExceptionType.SUPPLIER_DELAY
+    session.commit()
+
+    before = {
+        record.id: (record.exception_type, record.status)
+        for record in session.scalars(select(ExceptionRecord))
+    }
+    _seed_lifecycle_sample(session, changed_at=AS_OF)
+    session.commit()
+
+    assert {
+        record.id: (record.exception_type, record.status)
+        for record in session.scalars(select(ExceptionRecord))
+    } == before
+    assert session.scalar(select(func.count()).select_from(ExceptionHistory)) == 6
+
+
+def test_bootstrap_lifecycle_sample_preserves_manual_state_and_history_on_rerun() -> None:
+    session = session_with_fixture()
+    ExceptionService(session).detect(AS_OF)
+    session.commit()
+    record = session.scalar(
+        select(ExceptionRecord).where(ExceptionRecord.exception_type == ExceptionType.STOCKOUT_RISK)
+    )
+    assert record is not None
+    transition_exception(session, record.id, ExceptionStatus.ACKNOWLEDGED, actor="operator")
+    session.commit()
+    before_history = [
+        (row.from_status, row.to_status, row.actor)
+        for row in session.scalars(
+            select(ExceptionHistory).where(ExceptionHistory.exception_id == record.id)
+        )
+    ]
+
+    _seed_lifecycle_sample(session, changed_at=AS_OF)
+    session.commit()
+
+    refreshed = session.get(ExceptionRecord, record.id)
+    assert refreshed is not None
+    assert refreshed.status == ExceptionStatus.ACKNOWLEDGED
+    assert [
+        (row.from_status, row.to_status, row.actor)
+        for row in session.scalars(
+            select(ExceptionHistory).where(ExceptionHistory.exception_id == record.id)
+        )
+    ] == before_history
 
 
 def test_active_rerun_updates_derived_fields_without_history_or_status_change() -> None:
