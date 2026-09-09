@@ -2,6 +2,7 @@
   "dataset": "dataco",
   "role": "secondary",
   "canonical_url": "https://data.mendeley.com/datasets/8gx2fvg2k6/5",
+  "source_version": "5",
   "license": "CC BY 4.0",
   "provenance": "Mendeley Data DOI record, version 5; nature observed versus synthetic remains unclear.",
   "caveats": [
@@ -14,9 +15,16 @@
   "acquisition": {
     "method": "manual_or_user_authorized_download",
     "credentials": "never_store_credentials_or_tokens",
+    "encoding": "latin-1",
     "expected_tables": ["orders"],
     "files": {
       "orders": "DataCoSupplyChainDataset.csv"
     }
+  },
+  "verification": {
+    "status": "verified_local_file_outside_repository",
+    "filename": "DataCoSupplyChainDataset.csv",
+    "encoding": "latin-1",
+    "sha256": "fa6d022ed437155e1a2f0378710602848703c8a7f203f7ff5d77805bf8480aa6"
   }
 }

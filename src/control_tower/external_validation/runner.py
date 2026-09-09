@@ -28,6 +28,7 @@ def run_validation(
         input_dir,
         manifest["acquisition"]["files"],
         sample_size=sample_size,
+        encoding=manifest["acquisition"].get("encoding", "utf-8"),
     )
     adapter = OlistAdapter() if dataset == "olist" else DataCoAdapter()
     adapted = adapter.adapt(tables)

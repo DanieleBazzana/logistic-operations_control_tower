@@ -2,6 +2,7 @@
   "dataset": "olist",
   "role": "primary",
   "canonical_url": "https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce",
+  "source_version": "not verified locally",
   "license": "CC BY-NC-SA 4.0",
   "provenance": "Observed/anonymized Brazilian commercial marketplace data; canonical source metadata only.",
   "caveats": [
@@ -13,6 +14,7 @@
   "acquisition": {
     "method": "manual_or_user_authorized_download",
     "credentials": "never_store_credentials_or_tokens",
+    "download_status": "blocked/login-required",
     "expected_tables": ["orders", "order_items", "payments", "products", "customers", "sellers"],
     "files": {
       "orders": "olist_orders_dataset.csv",

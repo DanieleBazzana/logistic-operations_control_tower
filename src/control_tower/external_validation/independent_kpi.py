@@ -21,7 +21,7 @@ def _instant(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     text = str(value).strip().replace("Z", "+00:00")
-    for fmt in (None, "%m/%d/%Y"):
+    for fmt in (None, "%m/%d/%Y %H:%M", "%m/%d/%Y"):
         try:
             parsed = datetime.fromisoformat(text) if fmt is None else datetime.strptime(text, fmt)
         except ValueError:
@@ -30,6 +30,22 @@ def _instant(value: Any) -> datetime | None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     return None
+
+
+def _order_level_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the adapter's first source row for each identifiable order."""
+
+    seen: set[str] = set()
+    order_rows: list[dict[str, Any]] = []
+    for row in rows:
+        order_id = _value(row, "order_id", "Order Id")
+        if order_id in (None, ""):
+            continue
+        key = str(order_id).strip()
+        if key not in seen:
+            seen.add(key)
+            order_rows.append(row)
+    return order_rows
 
 
 def _money(value: Any) -> Decimal | None:
@@ -49,7 +65,7 @@ def calculate_independent_kpis(
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must include a timezone")
     instant = as_of.astimezone(timezone.utc)
-    rows = tables.get("orders", [])
+    rows = _order_level_rows(tables.get("orders", []))
     if dataset not in {"olist", "dataco"}:
         raise ValueError(f"unsupported dataset: {dataset}")
     processed = [
@@ -85,20 +101,17 @@ def calculate_independent_kpis(
             )
         statuses.append((row, status))
     fulfilled = [row for row, status in statuses if status == "FULFILLED"]
-    on_time = 0
+    sla_observations: list[bool] = []
     for row in fulfilled:
         delivered = _instant(_value(row, "order_delivered_customer_date"))
         promised = _instant(_value(row, "order_estimated_delivery_date"))
-        if (
-            delivered is not None
-            and delivered <= instant
-            and promised is not None
-            and delivered <= promised
-        ):
-            on_time += 1
+        if delivered is not None and delivered <= instant and promised is not None:
+            sla_observations.append(delivered <= promised)
     sla = (
-        (Decimal(on_time * 100) / Decimal(len(fulfilled))).quantize(Decimal("0.01"))
-        if fulfilled
+        (Decimal(sum(sla_observations) * 100) / Decimal(len(sla_observations))).quantize(
+            Decimal("0.01")
+        )
+        if sla_observations
         else None
     )
     return {

@@ -10,7 +10,11 @@ service, dashboard, bootstrap, or M07.4 files.
   CC BY-NC-SA 4.0.
 - `manifests/dataco.json` is secondary only: Mendeley Data DOI record version 5,
   CC BY 4.0. Whether the dataset is observed or synthetic remains unclear and is
-  preserved as a caveat.
+  preserved as a caveat. The verified local file uses `latin-1` and has the manifest's
+  recorded SHA-256 checksum; the raw file remains outside the repository.
+- `manifests/olist.json` remains primary, but its Kaggle download was blocked by a
+  login requirement in the verification environment. No Olist checksum or profiling
+  count is asserted.
 
 The manifests contain URLs, licenses, expected filenames, and a no-raw-data policy.
 They do not contain credentials, tokens, or downloaded data. The validator never
@@ -34,6 +38,13 @@ output records row counts, accepted/rejected/identical-duplicate counts, mapping
 `SOURCE -> TRANSFORMATION -> OUTPUT` provenance, unavailable domains, independent
 order-side KPIs, and KPI/queue coherence. It also records `api_called: false` and
 `raw_data_committed: false`.
+
+The DataCo adapter groups source line rows by `Order Id` at order level and retains
+only the first source row for the independent order-side KPI calculation. DataCo's
+`source_warehouse_id`, `promised_at`, and `currency` remain unavailable and therefore
+continue to be rejected by the existing ingestion contract; no mapping is invented.
+When both promised and fulfilled timestamps are unavailable, SLA is reported as
+unavailable (`null`), never as zero.
 
 ## Mapping and truth boundary
 

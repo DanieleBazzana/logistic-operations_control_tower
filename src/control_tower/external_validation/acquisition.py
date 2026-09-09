@@ -21,9 +21,13 @@ def load_manifest(dataset: str) -> dict[str, Any]:
 
 
 def read_local_tables(
-    root: str | Path, files: dict[str, str], *, sample_size: int | None = None
+    root: str | Path,
+    files: dict[str, str],
+    *,
+    sample_size: int | None = None,
+    encoding: str = "utf-8",
 ) -> dict[str, list[dict[str, str]]]:
-    """Read user-provided local CSVs with an optional deterministic row bound."""
+    """Read user-provided local CSVs with an optional bound and explicit encoding."""
 
     if sample_size is not None and sample_size < 0:
         raise ValueError("sample_size must be non-negative")
@@ -32,7 +36,7 @@ def read_local_tables(
     for table, relative_path in files.items():
         path = (base / relative_path).resolve()
         path.relative_to(base)
-        with path.open(encoding="utf-8", newline="") as handle:
+        with path.open(encoding=encoding, newline="") as handle:
             reader = csv.DictReader(handle)
             iterator: Iterable[dict[str, str]] = reader
             if sample_size is not None:

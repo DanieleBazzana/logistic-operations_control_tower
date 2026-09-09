@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from control_tower.external_validation.acquisition import load_manifest
+from control_tower.external_validation.acquisition import load_manifest, read_local_tables
 from control_tower.external_validation.adapters import (
     DataCoAdapter,
     OlistAdapter,
@@ -25,8 +25,14 @@ def test_manifests_are_metadata_only_and_preserve_license_caveats() -> None:
     assert dataco["role"] == "secondary"
     assert dataco["canonical_url"].startswith("https://data.mendeley.com/")
     assert dataco["license"] == "CC BY 4.0"
+    assert dataco["source_version"] == "5"
+    assert dataco["acquisition"]["encoding"] == "latin-1"
+    assert dataco["verification"]["sha256"] == (
+        "fa6d022ed437155e1a2f0378710602848703c8a7f203f7ff5d77805bf8480aa6"
+    )
     assert any("synthetic" in caveat for caveat in dataco["caveats"])
     assert olist["raw_data_policy"] == "never_commit"
+    assert olist["acquisition"]["download_status"] == "blocked/login-required"
 
 
 def test_normalization_is_deterministic_and_sampling_is_bounded() -> None:
@@ -38,6 +44,19 @@ def test_normalization_is_deterministic_and_sampling_is_bounded() -> None:
     }
     rows = ({"id": str(index)} for index in range(5))
     assert bounded_rows(rows, 2) == [{"id": "0"}, {"id": "1"}]
+
+
+def test_local_table_reader_defaults_to_utf8_and_accepts_manifest_encoding(tmp_path) -> None:
+    utf8_path = tmp_path / "utf8.csv"
+    utf8_path.write_text("name\nMünchen\n", encoding="utf-8")
+    assert read_local_tables(tmp_path, {"rows": "utf8.csv"})["rows"][0]["name"] == "München"
+
+    latin1_path = tmp_path / "latin1.csv"
+    latin1_path.write_bytes("name\nSão Paulo\n".encode("latin-1"))
+    assert (
+        read_local_tables(tmp_path, {"rows": "latin1.csv"}, encoding="latin-1")["rows"][0]["name"]
+        == "São Paulo"
+    )
 
 
 def test_olist_adapter_maps_orders_and_marks_unavailable_operational_domains() -> None:
@@ -100,6 +119,26 @@ def test_dataco_adapter_keeps_secondary_provenance_and_does_not_fabricate_delive
     assert order["fulfilled_at"] is None
     assert any("DataCo" in item.source for item in result.provenance)
     assert any(item.output_field == "promised_at" for item in result.unavailable)
+
+
+def test_dataco_required_unavailable_fields_remain_rejected() -> None:
+    adapted = DataCoAdapter().adapt(
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018 10:30",
+                    "Sales": "99.00",
+                }
+            ]
+        }
+    )
+    result = validate_adapted(adapted)["oms/orders.csv"]
+    required_fields = {
+        rejection.field for rejection in result.rejections if rejection.error_code == "REQUIRED"
+    }
+    assert {"source_warehouse_id", "promised_at", "currency"} <= required_fields
 
 
 def test_adapted_rows_use_existing_validator_for_nulls_and_conflicts() -> None:
@@ -186,6 +225,54 @@ def test_independent_kpi_calculation_is_deterministic_and_not_api_based() -> Non
     assert kpis["formula_source"] == "external_validation.independent_kpi"
 
 
+def test_independent_kpi_parses_dataco_datetime_and_uses_order_granularity() -> None:
+    kpis = calculate_independent_kpis(
+        "dataco",
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018 10:30",
+                    "Delivery Status": "Advance shipping",
+                    "Sales": "50.00",
+                },
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018 10:30",
+                    "Delivery Status": "Advance shipping",
+                    "Sales": "49.00",
+                },
+            ]
+        },
+        as_of=datetime(2018, 1, 1, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert kpis["orders_processed"] == 0
+    assert kpis["fulfilled_orders"] == 0
+
+
+def test_independent_kpi_sla_is_unavailable_without_promised_and_fulfilled_dates() -> None:
+    kpis = calculate_independent_kpis(
+        "dataco",
+        {
+            "orders": [
+                {
+                    "Order Id": "100",
+                    "Order Status": "COMPLETE",
+                    "Order Date (DateOrders)": "01/01/2018 10:30",
+                    "Delivery Status": "Advance shipping",
+                }
+            ]
+        },
+        as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert kpis["fulfilled_orders"] == 1
+    assert kpis["sla_performance_pct"] is None
+
+
 def test_validation_evidence_is_structured_and_explicit_about_non_comparability() -> None:
     evidence = build_validation_evidence(
         dataset="olist",
@@ -207,10 +294,11 @@ def test_validation_evidence_is_structured_and_explicit_about_non_comparability(
 
 def test_runner_writes_local_evidence_without_api_or_raw_data(tmp_path) -> None:
     csv_path = tmp_path / "DataCoSupplyChainDataset.csv"
-    csv_path.write_text(
-        "Order Id,Order Status,Order Date (DateOrders),Sales,Delivery Status\n"
-        "100,COMPLETE,1/1/2018,99.00,Advance shipping\n",
-        encoding="utf-8",
+    csv_path.write_bytes(
+        (
+            "Order Id,Order Status,Order Date (DateOrders),Sales,Delivery Status,Order Region\n"
+            "100,COMPLETE,1/1/2018,99.00,Advance shipping,São Paulo\n"
+        ).encode("latin-1")
     )
     output_path = tmp_path / "evidence.json"
 
