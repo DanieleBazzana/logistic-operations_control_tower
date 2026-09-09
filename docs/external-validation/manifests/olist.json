@@ -1,0 +1,26 @@
+{
+  "dataset": "olist",
+  "role": "primary",
+  "canonical_url": "https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce",
+  "license": "CC BY-NC-SA 4.0",
+  "provenance": "Observed/anonymized Brazilian commercial marketplace data; canonical source metadata only.",
+  "caveats": [
+    "No warehouse, supplier, carrier, inventory, or source currency fields are assumed.",
+    "External timestamps without offsets are normalized with an explicit APPROXIMATE UTC assumption.",
+    "Payment totals are source-derived order amounts, not revenue-at-risk or application findings."
+  ],
+  "raw_data_policy": "never_commit",
+  "acquisition": {
+    "method": "manual_or_user_authorized_download",
+    "credentials": "never_store_credentials_or_tokens",
+    "expected_tables": ["orders", "order_items", "payments", "products", "customers", "sellers"],
+    "files": {
+      "orders": "olist_orders_dataset.csv",
+      "order_items": "olist_order_items_dataset.csv",
+      "payments": "olist_order_payments_dataset.csv",
+      "products": "olist_products_dataset.csv",
+      "customers": "olist_customers_dataset.csv",
+      "sellers": "olist_sellers_dataset.csv"
+    }
+  }
+}

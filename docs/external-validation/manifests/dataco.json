@@ -1,0 +1,22 @@
+{
+  "dataset": "dataco",
+  "role": "secondary",
+  "canonical_url": "https://data.mendeley.com/datasets/8gx2fvg2k6/5",
+  "license": "CC BY 4.0",
+  "provenance": "Mendeley Data DOI record, version 5; nature observed versus synthetic remains unclear.",
+  "caveats": [
+    "Nature of the dataset (observed versus synthetic) remains unclear; report it as unresolved.",
+    "Secondary comparison only; do not combine counts with Olist.",
+    "No warehouse, supplier, inventory, carrier, trustworthy delivered-at, or source currency fields are assumed.",
+    "The shipping schedule is not reinterpreted as a promised delivery timestamp."
+  ],
+  "raw_data_policy": "never_commit",
+  "acquisition": {
+    "method": "manual_or_user_authorized_download",
+    "credentials": "never_store_credentials_or_tokens",
+    "expected_tables": ["orders"],
+    "files": {
+      "orders": "DataCoSupplyChainDataset.csv"
+    }
+  }
+}
