@@ -29,7 +29,7 @@ def run_validation(
 
     manifest = load_manifest(dataset)
     acquisition = manifest["acquisition"]
-    verify_declared_files(
+    computed_verification = verify_declared_files(
         input_dir,
         acquisition["files"],
         manifest.get("verification", {}),
@@ -64,16 +64,32 @@ def run_validation(
             for item in adapted.provenance
         ],
         mappings=adapted.mappings,
-        manifest_provenance={
-            "source_version": manifest.get("source_version"),
-            "filename": manifest.get("verification", {}).get("filename"),
-            "encoding": manifest.get("verification", {}).get(
-                "encoding", acquisition.get("encoding")
-            ),
-            "sha256": manifest.get("verification", {}).get("sha256"),
-            "status": manifest.get("verification", {}).get("status"),
-        },
+        manifest_provenance=_manifest_provenance(manifest, acquisition, computed_verification),
     )
+
+
+def _manifest_provenance(
+    manifest: dict[str, Any],
+    acquisition: dict[str, Any],
+    computed_verification: dict[str, Any] | None,
+) -> dict[str, Any]:
+    verification = manifest.get("verification", {})
+    if computed_verification is None:
+        return {
+            "source_version": manifest.get("source_version"),
+            "filename": verification.get("filename"),
+            "encoding": verification.get("encoding", acquisition.get("encoding")),
+            "sha256": verification.get("sha256"),
+            "status": verification.get("status"),
+        }
+    return {
+        "source_version": manifest.get("source_version"),
+        "license": manifest.get("license"),
+        "encoding": verification.get("encoding", acquisition.get("encoding")),
+        "status": verification.get("status"),
+        "archive": computed_verification["archive"],
+        "files": computed_verification["files"],
+    }
 
 
 def write_evidence(evidence: dict[str, Any], output: str | Path) -> None:

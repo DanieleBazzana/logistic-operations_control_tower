@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import stat
 from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -30,8 +31,44 @@ def _local_path(root: str | Path, relative_path: str) -> Path:
 
 def verify_declared_files(
     root: str | Path, files: Mapping[str, str], verification: Mapping[str, Any]
-) -> None:
+) -> dict[str, Any] | None:
     """Verify declared bytes before any CSV parser consumes them."""
+
+    if "files" in verification or "archive" in verification:
+        if not verification.get("files") or not verification.get("archive"):
+            raise ValueError("per-file verification requires archive and files metadata")
+        encoding = str(verification.get("encoding", "utf-8"))
+        if encoding.lower().replace("_", "-") != "utf-8":
+            raise ValueError(f"per-file verification requires UTF-8 encoding, got {encoding}")
+        archive = verification["archive"]
+        archive_path = _local_path(root, str(archive["filename"]))
+        _verify_bytes(archive_path, archive, str(archive["filename"]))
+
+        computed_files: dict[str, dict[str, Any]] = {}
+        for metadata in verification["files"].values():
+            filename = str(metadata["filename"])
+            path = _local_path(root, filename)
+            _verify_bytes(path, metadata, filename)
+            row_count = _csv_row_count(path, encoding)
+            if row_count != int(metadata["row_count"]):
+                raise ValueError(
+                    f"CSV row-count mismatch for declared file {filename}: "
+                    f"expected {metadata['row_count']}, got {row_count}"
+                )
+            computed_files[filename] = {
+                "filename": filename,
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256(path),
+                "row_count": row_count,
+            }
+        return {
+            "archive": {
+                "filename": str(archive["filename"]),
+                "size_bytes": archive_path.stat().st_size,
+                "sha256": _sha256(archive_path),
+            },
+            "files": computed_files,
+        }
 
     if verification.get(
         "status"
@@ -52,6 +89,42 @@ def verify_declared_files(
                 f"SHA-256 mismatch for declared file {relative_path}: "
                 f"expected {expected}, got {actual}"
             )
+
+
+def _verify_bytes(path: Path, metadata: Mapping[str, Any], label: str) -> None:
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"declared file is missing: {path}") from error
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"declared file is not a regular file: {label}")
+    expected_size = int(metadata["size_bytes"])
+    actual_size = path.stat().st_size
+    if actual_size != expected_size:
+        raise ValueError(
+            f"size mismatch for declared file {label}: expected {expected_size}, got {actual_size}"
+        )
+    expected = str(metadata["sha256"]).lower()
+    actual = _sha256(path)
+    if actual != expected:
+        raise ValueError(
+            f"SHA-256 mismatch for declared file {label}: expected {expected}, got {actual}"
+        )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _csv_row_count(path: Path, encoding: str) -> int:
+    with path.open("r", encoding=encoding, newline="") as handle:
+        reader = csv.reader(handle)
+        next(reader, None)
+        return sum(1 for _ in reader)
 
 
 def read_local_tables(

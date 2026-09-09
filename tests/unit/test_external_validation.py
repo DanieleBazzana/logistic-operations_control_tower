@@ -1,8 +1,16 @@
+import csv
+import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from control_tower.external_validation import runner as runner_module
-from control_tower.external_validation.acquisition import load_manifest, read_local_tables
+from control_tower.external_validation.acquisition import (
+    load_manifest,
+    read_local_tables,
+    verify_declared_files,
+)
 from control_tower.external_validation.adapters import (
     DataCoAdapter,
     OlistAdapter,
@@ -33,7 +41,144 @@ def test_manifests_are_metadata_only_and_preserve_license_caveats() -> None:
     )
     assert any("synthetic" in caveat for caveat in dataco["caveats"])
     assert olist["raw_data_policy"] == "never_commit"
-    assert olist["acquisition"]["download_status"] == "blocked/login-required"
+    assert olist["source_version"] == "2"
+    assert olist["acquisition"]["download_status"] == "verified_local_file_outside_repository"
+    assert olist["verification"]["encoding"] == "utf-8"
+    assert set(olist["verification"]["files"]) == {
+        "olist_customers_dataset.csv",
+        "olist_geolocation_dataset.csv",
+        "olist_order_items_dataset.csv",
+        "olist_order_payments_dataset.csv",
+        "olist_order_reviews_dataset.csv",
+        "olist_orders_dataset.csv",
+        "olist_products_dataset.csv",
+        "olist_sellers_dataset.csv",
+        "product_category_name_translation.csv",
+    }
+
+
+def _write_verified_olist_fixture(tmp_path):
+    files = {
+        "olist_customers_dataset.csv": "id,name\n1,Ana\n",
+        "olist_geolocation_dataset.csv": "zip,lat\n1,0\n",
+        "olist_order_items_dataset.csv": "id,item\n1,book\n",
+        "olist_order_payments_dataset.csv": "id,value\n1,10\n",
+        "olist_order_reviews_dataset.csv": 'id,comment\n1,"line one\nline two"\n',
+        "olist_orders_dataset.csv": "id,status\n1,delivered\n",
+        "olist_products_dataset.csv": "id,title\n1,Book\n",
+        "olist_sellers_dataset.csv": "id,state\n1,SP\n",
+        "product_category_name_translation.csv": "name,en\nlivros,books\n",
+    }
+    metadata = {}
+    for filename, content in files.items():
+        path = tmp_path / filename
+        path.write_text(content, encoding="utf-8", newline="")
+        metadata[filename] = {
+            "filename": filename,
+            "size_bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "row_count": sum(1 for _ in csv.reader(content.splitlines(keepends=True))) - 1,
+        }
+    archive = tmp_path / "olist.zip"
+    archive.write_bytes(b"archive bytes")
+    archive_metadata = {
+        "filename": archive.name,
+        "size_bytes": archive.stat().st_size,
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+    }
+    verification = {
+        "status": "verified_local_file_outside_repository",
+        "encoding": "utf-8",
+        "archive": archive_metadata,
+        "files": metadata,
+    }
+    return files, verification
+
+
+def test_olist_per_file_verification_checks_archive_and_logical_csv_rows(tmp_path) -> None:
+    files, verification = _write_verified_olist_fixture(tmp_path)
+
+    computed = verify_declared_files(tmp_path, files, verification)
+
+    assert computed["archive"] == verification["archive"]
+    assert computed["files"]["olist_order_reviews_dataset.csv"]["row_count"] == 1
+    assert computed["files"] == verification["files"]
+
+
+@pytest.mark.parametrize("change", ["size_bytes", "sha256", "row_count"])
+def test_olist_per_file_verification_rejects_declared_mismatch(tmp_path, change) -> None:
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    verification["files"]["olist_orders_dataset.csv"][change] = (
+        verification["files"]["olist_orders_dataset.csv"][change] + 1
+        if change != "sha256"
+        else "0" * 64
+    )
+
+    with pytest.raises(ValueError, match="olist_orders_dataset.csv"):
+        verify_declared_files(tmp_path, files, verification)
+
+
+def test_olist_per_file_verification_rejects_missing_or_invalid_utf8(tmp_path) -> None:
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    (tmp_path / "olist_products_dataset.csv").unlink()
+    with pytest.raises(FileNotFoundError, match="olist_products_dataset.csv"):
+        verify_declared_files(tmp_path, files, verification)
+
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    invalid = tmp_path / "olist_products_dataset.csv"
+    invalid.write_bytes(b"id,title\n1,\xff\n")
+    verification["files"][invalid.name]["size_bytes"] = invalid.stat().st_size
+    verification["files"][invalid.name]["sha256"] = hashlib.sha256(invalid.read_bytes()).hexdigest()
+    with pytest.raises(UnicodeDecodeError):
+        verify_declared_files(tmp_path, files, verification)
+
+
+def test_olist_per_file_verification_rejects_traversal_and_nonregular_archive(tmp_path) -> None:
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    verification["archive"]["filename"] = "../olist.zip"
+    with pytest.raises(ValueError):
+        verify_declared_files(tmp_path, files, verification)
+
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    archive = tmp_path / "olist.zip"
+    archive.unlink()
+    archive.mkdir()
+    with pytest.raises(ValueError, match="regular file"):
+        verify_declared_files(tmp_path, files, verification)
+
+
+def test_runner_evidence_contains_verified_olist_manifest_provenance(tmp_path, monkeypatch) -> None:
+    files, verification = _write_verified_olist_fixture(tmp_path)
+    manifest = load_manifest("olist")
+    manifest["verification"] = verification
+    monkeypatch.setattr(runner_module, "load_manifest", lambda dataset: manifest)
+
+    evidence = run_validation(
+        "olist",
+        tmp_path,
+        as_of=datetime(2018, 1, 2, tzinfo=timezone.utc),
+        sample_size=1,
+    )
+
+    provenance = evidence["manifest_provenance"]
+    assert provenance["source_version"] == "2"
+    assert provenance["license"] == "CC BY-NC-SA 4.0"
+    assert provenance["status"] == "verified_local_file_outside_repository"
+    assert provenance["archive"]["sha256"] == verification["archive"]["sha256"]
+    assert provenance["files"]["olist_orders_dataset.csv"]["row_count"] == 1
+
+
+def test_dataco_scalar_verification_still_returns_no_computed_provenance(tmp_path) -> None:
+    path = tmp_path / "DataCoSupplyChainDataset.csv"
+    path.write_bytes(b"orders\n1\n")
+    verification = {
+        "status": "verified_local_file_outside_repository",
+        "filename": path.name,
+        "encoding": "latin-1",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+    assert verify_declared_files(tmp_path, {"orders": path.name}, verification) is None
 
 
 def test_normalization_is_deterministic_and_sampling_is_bounded() -> None:

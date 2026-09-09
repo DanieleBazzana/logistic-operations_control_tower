@@ -14,9 +14,13 @@ service, dashboard, bootstrap, or M07.4 files.
   recorded SHA-256 checksum; the raw file remains outside the repository. The runner
   hashes the declared file before CSV parsing and fails on a missing file or checksum
   mismatch, so evidence is never emitted for unverified bytes.
-- `manifests/olist.json` remains primary, but its Kaggle download was blocked by a
-  login requirement in the verification environment. No Olist checksum or profiling
-  count is asserted.
+- `manifests/olist.json` remains primary. The canonical version 2 archive was acquired
+  and verified locally outside the repository; its archive checksum and each of the
+  nine CSV file checksums, byte sizes, and logical row counts are committed as
+  provenance. Raw files remain outside the repository. Olist verification records
+  the archive and every CSV file's filename, byte size, SHA-256, and logical CSV row
+  count (records after the header, not physical newline count), including quoted
+  newlines. DataCo retains its scalar filename/encoding/SHA-256 provenance fields.
 
 The manifests contain URLs, licenses, expected filenames, and a no-raw-data policy.
 They do not contain credentials, tokens, or downloaded data. The validator never
@@ -43,8 +47,10 @@ the aggregate and artifact levels. `rejected_orders` counts unique rejected orde
 are not misreported as multiple rejected orders. It also records committed manifest
 provenance (`source_version`, filename, encoding, SHA-256, and verification status),
 `SOURCE -> TRANSFORMATION -> OUTPUT` provenance, unavailable domains, independent
-order-side KPIs, and KPI/queue coherence. It also records `api_called: false` and
-`raw_data_committed: false`.
+order-side KPIs, and KPI/queue coherence. For DataCo, manifest provenance retains
+scalar filename, encoding, SHA-256, and verification status; for Olist it includes
+version, license, encoding, archive metadata, and per-file metadata. It also records
+`api_called: false` and `raw_data_committed: false`.
 
 The DataCo adapter groups source line rows by `Order Id` at order level and retains
 only the first source row for the independent order-side KPI calculation. The
