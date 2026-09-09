@@ -28,11 +28,9 @@ def _as_of(value: str) -> datetime:
 
 
 def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
-    """Apply the fixed six-record lifecycle sample without duplicating history."""
+    """Seed one deterministic lifecycle representative for each mapped type."""
 
     lifecycle_paths = {
-        ExceptionType.SLA_BREACH_RISK: (),
-        ExceptionType.INVENTORY_SHORTAGE: (),
         ExceptionType.STOCKOUT_RISK: (ExceptionStatus.ACKNOWLEDGED,),
         ExceptionType.INVENTORY_MISMATCH: (
             ExceptionStatus.ACKNOWLEDGED,
@@ -45,21 +43,25 @@ def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
         ),
         ExceptionType.SHIPMENT_DELAY: (ExceptionStatus.DISMISSED,),
     }
-    records = list(
-        session.scalars(
-            select(ExceptionRecord).where(
-                ExceptionRecord.exception_type.in_(lifecycle_paths)
-            )
+    records = session.scalars(
+        select(ExceptionRecord)
+        .where(ExceptionRecord.exception_type.in_(lifecycle_paths))
+        .order_by(
+            ExceptionRecord.exception_type,
+            ExceptionRecord.issue_key,
+            ExceptionRecord.entity_type,
+            ExceptionRecord.entity_id,
+            ExceptionRecord.deduplication_key,
         )
     )
-    records_by_type = {record.exception_type: record for record in records}
-    if len(records) != len(lifecycle_paths) or set(records_by_type) != set(lifecycle_paths):
-        return
-    if any(record.status != ExceptionStatus.OPEN for record in records_by_type.values()):
-        return
+    records_by_type: dict[ExceptionType, ExceptionRecord] = {}
+    for record in records:
+        records_by_type.setdefault(record.exception_type, record)
 
     for exception_type, path in lifecycle_paths.items():
-        record = records_by_type[exception_type]
+        record = records_by_type.get(exception_type)
+        if record is None or record.status != ExceptionStatus.OPEN:
+            continue
         for target in path:
             transition_exception(
                 session,

@@ -50,8 +50,6 @@ def test_bootstrap_lifecycle_sample_is_deterministic_and_idempotent() -> None:
     session.commit()
 
     expected_statuses = {
-        ExceptionType.SLA_BREACH_RISK: ExceptionStatus.OPEN,
-        ExceptionType.INVENTORY_SHORTAGE: ExceptionStatus.OPEN,
         ExceptionType.STOCKOUT_RISK: ExceptionStatus.ACKNOWLEDGED,
         ExceptionType.INVENTORY_MISMATCH: ExceptionStatus.IN_PROGRESS,
         ExceptionType.SUPPLIER_DELAY: ExceptionStatus.RESOLVED,
@@ -60,6 +58,7 @@ def test_bootstrap_lifecycle_sample_is_deterministic_and_idempotent() -> None:
     assert {
         record.exception_type: record.status
         for record in session.scalars(select(ExceptionRecord))
+        if record.exception_type in expected_statuses
     } == expected_statuses
     assert {
         status: session.scalar(
@@ -83,39 +82,140 @@ def test_bootstrap_lifecycle_sample_is_deterministic_and_idempotent() -> None:
     assert session.scalar(select(func.count()).select_from(ExceptionHistory)) == history_count
 
 
-def test_bootstrap_lifecycle_sample_does_not_seed_incomplete_or_duplicate_types() -> None:
+def _add_lower_sort_duplicate_records(session) -> None:
+    """Add a second OPEN finding for every detected type with a larger DB id."""
+
+    records = list(session.scalars(select(ExceptionRecord).order_by(ExceptionRecord.id)))
+    session.add_all(
+        [
+            ExceptionRecord(
+                id=100 + index,
+                deduplication_key=f"{record.deduplication_key}:duplicate",
+                exception_type=record.exception_type,
+                issue_key=f"AAA:{record.issue_key}",
+                entity_type=record.entity_type,
+                entity_id=f"AAA:{record.entity_id}",
+                severity=record.severity,
+                status=ExceptionStatus.OPEN,
+                detected_at=record.detected_at,
+                expected_resolution=record.expected_resolution,
+                business_impact=record.business_impact,
+                revenue_at_risk=record.revenue_at_risk,
+                orders_affected=record.orders_affected,
+                root_cause=record.root_cause,
+                recommended_action=record.recommended_action,
+                confidence=record.confidence,
+                warehouse_id=record.warehouse_id,
+                product_id=record.product_id,
+            )
+            for index, record in enumerate(records)
+        ]
+    )
+    session.flush()
+
+
+def test_bootstrap_lifecycle_sample_selects_one_stable_representative_per_bucket() -> None:
     session = session_with_fixture()
     ExceptionService(session).detect(AS_OF)
     session.commit()
-    record = session.scalar(
-        select(ExceptionRecord).where(
-            ExceptionRecord.exception_type == ExceptionType.SHIPMENT_DELAY
-        )
-    )
-    assert record is not None
-    record.exception_type = ExceptionType.SUPPLIER_DELAY
+    _add_lower_sort_duplicate_records(session)
     session.commit()
 
-    before = {
-        record.id: (record.exception_type, record.status)
-        for record in session.scalars(select(ExceptionRecord))
-    }
     _seed_lifecycle_sample(session, changed_at=AS_OF)
     session.commit()
 
+    assert session.scalar(select(func.count()).select_from(ExceptionRecord)) == 12
     assert {
-        record.id: (record.exception_type, record.status)
+        status: session.scalar(
+            select(func.count())
+            .select_from(ExceptionRecord)
+            .where(ExceptionRecord.status == status)
+        )
+        for status in ExceptionStatus
+    } == {
+        ExceptionStatus.OPEN: 8,
+        ExceptionStatus.ACKNOWLEDGED: 1,
+        ExceptionStatus.IN_PROGRESS: 1,
+        ExceptionStatus.RESOLVED: 1,
+        ExceptionStatus.DISMISSED: 1,
+    }
+    selected = {
+        record.exception_type: record.issue_key
         for record in session.scalars(select(ExceptionRecord))
-    } == before
-    assert session.scalar(select(func.count()).select_from(ExceptionHistory)) == 6
+        if record.status != ExceptionStatus.OPEN
+    }
+    assert selected == {
+        ExceptionType.STOCKOUT_RISK: "AAA:PRODUCT_WAREHOUSE:P1:W1",
+        ExceptionType.INVENTORY_MISMATCH: "AAA:PRODUCT_WAREHOUSE:P1:W1",
+        ExceptionType.SUPPLIER_DELAY: "AAA:PO:PO1",
+        ExceptionType.SHIPMENT_DELAY: "AAA:SHIPMENT:S1",
+    }
+
+
+def test_bootstrap_lifecycle_selection_is_stable_when_record_ids_and_order_differ() -> None:
+    def snapshot(reverse: bool) -> dict[tuple[ExceptionType, str], ExceptionStatus]:
+        session = session_with_fixture()
+        ExceptionService(session).detect(AS_OF)
+        session.commit()
+        records = list(session.scalars(select(ExceptionRecord).order_by(ExceptionRecord.id)))
+        duplicates = [
+            ExceptionRecord(
+                id=100 + (len(records) - index if reverse else index),
+                deduplication_key=f"stable:{record.deduplication_key}",
+                exception_type=record.exception_type,
+                issue_key=f"000:{record.issue_key}",
+                entity_type=record.entity_type,
+                entity_id=f"000:{record.entity_id}",
+                severity=record.severity,
+                status=ExceptionStatus.OPEN,
+                detected_at=record.detected_at,
+                expected_resolution=record.expected_resolution,
+                business_impact=record.business_impact,
+                revenue_at_risk=record.revenue_at_risk,
+                orders_affected=record.orders_affected,
+                root_cause=record.root_cause,
+                recommended_action=record.recommended_action,
+                confidence=record.confidence,
+                warehouse_id=record.warehouse_id,
+                product_id=record.product_id,
+            )
+            for index, record in enumerate(records)
+        ]
+        session.add_all(list(reversed(duplicates)) if reverse else duplicates)
+        session.flush()
+        _seed_lifecycle_sample(session, changed_at=AS_OF)
+        session.commit()
+        return {
+            (record.exception_type, record.issue_key): record.status
+            for record in session.scalars(select(ExceptionRecord))
+        }
+
+    first = snapshot(False)
+    second = snapshot(True)
+    assert first == second
+    assert {
+        key
+        for key, status in first.items()
+        if status != ExceptionStatus.OPEN
+    } == {
+        (ExceptionType.STOCKOUT_RISK, "000:PRODUCT_WAREHOUSE:P1:W1"),
+        (ExceptionType.INVENTORY_MISMATCH, "000:PRODUCT_WAREHOUSE:P1:W1"),
+        (ExceptionType.SUPPLIER_DELAY, "000:PO:PO1"),
+        (ExceptionType.SHIPMENT_DELAY, "000:SHIPMENT:S1"),
+    }
 
 
 def test_bootstrap_lifecycle_sample_preserves_manual_state_and_history_on_rerun() -> None:
     session = session_with_fixture()
     ExceptionService(session).detect(AS_OF)
     session.commit()
+    _add_lower_sort_duplicate_records(session)
+    session.commit()
     record = session.scalar(
-        select(ExceptionRecord).where(ExceptionRecord.exception_type == ExceptionType.STOCKOUT_RISK)
+        select(ExceptionRecord).where(
+            ExceptionRecord.exception_type == ExceptionType.STOCKOUT_RISK,
+            ExceptionRecord.issue_key == "AAA:PRODUCT_WAREHOUSE:P1:W1",
+        )
     )
     assert record is not None
     transition_exception(session, record.id, ExceptionStatus.ACKNOWLEDGED, actor="operator")
