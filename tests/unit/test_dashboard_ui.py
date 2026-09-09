@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 import pytest
 from streamlit.testing.v1 import AppTest
 
+import control_tower.dashboard.ui as dashboard_ui
 from control_tower.dashboard.ui import (
     KPI_DEFINITIONS,
+    _dashboard_styles,
     build_exception_filters,
     build_purchase_order_filters,
     exceptions_to_csv,
@@ -15,6 +17,40 @@ from control_tower.dashboard.ui import (
     format_enum,
     format_timestamp,
 )
+
+
+def test_dashboard_styles_define_scoped_semantic_tokens():
+    styles = _dashboard_styles()
+
+    assert '<style data-testid="dashboard-styles">' in styles
+    assert '[data-testid="dashboard-section"]' in styles
+    assert '[data-testid="dashboard-kpi-band"]' in styles
+    assert "--oc-app-bg" in styles
+    assert "--oc-accent" in styles
+    assert "--oc-status-critical" in styles
+    assert "--oc-status-warning" in styles
+    assert "--oc-status-success" in styles
+    assert "--oc-status-neutral" in styles
+
+
+def test_presentation_marker_escapes_dynamic_values(monkeypatch):
+    rendered = []
+    monkeypatch.setattr(
+        dashboard_ui.st,
+        "markdown",
+        lambda value, **kwargs: rendered.append((value, kwargs)),
+    )
+
+    dashboard_ui._presentation_marker('queue" onclick="bad', '<script>alert("x")</script>')
+
+    assert rendered == [
+        (
+            '<div data-testid="queue&quot; onclick=&quot;bad">'
+            '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;</div>',
+            {"unsafe_allow_html": True},
+        )
+    ]
+
 
 EXCEPTION = {
     "id": 1,
@@ -291,6 +327,18 @@ def test_dashboard_empty_state_offers_exact_message_and_queue_actions():
         item.value == "No exceptions match this combination of filters." for item in test_app.info
     )
     assert {item.label for item in test_app.button} >= {"Reset filters", "Show active queue"}
+
+
+def test_dashboard_exposes_stable_presentation_markers():
+    test_app = AppTest.from_function(_run_dashboard, args=(FakeClient(),)).run()
+
+    markdown = [item.value for item in test_app.markdown]
+    assert any('data-testid="dashboard-styles"' in item for item in markdown)
+    assert any('data-testid="dashboard-header"' in item for item in markdown)
+    assert any('data-testid="dashboard-kpi-band"' in item for item in markdown)
+    assert any('data-testid="dashboard-queue-surface"' in item for item in markdown)
+    assert any('data-testid="dashboard-facet-context"' in item for item in markdown)
+    assert any('data-testid="dashboard-detail-surface"' in item for item in markdown)
 
 
 def _run_dashboard(client):

@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from html import escape
 from typing import Any
 
 import pandas as pd
@@ -42,6 +43,126 @@ FACET_DEFINITIONS = (
     ("exception_type", EXCEPTION_TYPES, "Exception type"),
     ("severity", SEVERITIES, "Severity"),
 )
+
+
+def _dashboard_styles() -> str:
+    """Return deterministic, progressively enhanced dashboard presentation CSS."""
+
+    return """<style data-testid="dashboard-styles">
+:root {
+    --oc-app-bg: #0b1220;
+    --oc-sidebar-bg: #080e1a;
+    --oc-surface: rgba(20, 32, 52, 0.86);
+    --oc-surface-raised: rgba(25, 41, 66, 0.92);
+    --oc-border: rgba(148, 163, 184, 0.22);
+    --oc-border-strong: rgba(96, 165, 250, 0.42);
+    --oc-accent: #60a5fa;
+    --oc-text: #f8fafc;
+    --oc-muted: #a8b4c7;
+    --oc-status-critical: #f87171;
+    --oc-status-warning: #fb923c;
+    --oc-status-amber: #fbbf24;
+    --oc-status-success: #4ade80;
+    --oc-status-neutral: #94a3b8;
+}
+
+[data-testid="stAppViewContainer"] {
+    background: var(--oc-app-bg);
+    color: var(--oc-text);
+}
+
+[data-testid="stSidebar"] {
+    background: var(--oc-sidebar-bg);
+    border-right: 1px solid var(--oc-border);
+}
+
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+[data-testid="stMetric"] {
+    background: var(--oc-surface);
+    border: 1px solid var(--oc-border);
+    border-radius: 0.65rem;
+    box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.16);
+}
+
+[data-testid="dashboard-section"],
+[data-testid="dashboard-kpi-band"],
+[data-testid="dashboard-facet-context"],
+[data-testid="dashboard-queue-surface"],
+[data-testid="dashboard-detail-surface"],
+[data-testid="dashboard-history"],
+[data-testid="dashboard-supplier-context"],
+[data-testid="dashboard-read-only"] {
+    background: var(--oc-surface);
+    border: 1px solid var(--oc-border);
+    border-left: 3px solid var(--oc-accent);
+    border-radius: 0.45rem;
+    box-shadow: 0 0.35rem 1rem rgba(0, 0, 0, 0.12);
+    color: var(--oc-muted);
+    margin: 1rem 0 0.45rem;
+    padding: 0.2rem 0.7rem;
+}
+
+[data-testid="dashboard-section"] {
+    color: var(--oc-text);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+[data-testid="dashboard-kpi-band"] {
+    border-left-color: var(--oc-border-strong);
+    font-size: 0.78rem;
+}
+
+[data-testid="dashboard-facet-context"] {
+    border-left-color: var(--oc-status-neutral);
+}
+
+[data-testid="dashboard-read-only"] {
+    border-left-color: var(--oc-status-neutral);
+}
+
+[data-testid="dashboard-queue-surface"] {
+    border-left-color: var(--oc-status-warning);
+}
+
+[data-testid="dashboard-detail-surface"],
+[data-testid="dashboard-history"] {
+    border-left-color: var(--oc-status-amber);
+}
+
+[data-testid="dashboard-supplier-context"] {
+    border-left-color: var(--oc-status-success);
+}
+
+@supports ((backdrop-filter: blur(8px)) or (-webkit-backdrop-filter: blur(8px))) {
+    [data-testid="stMetric"] {
+        -webkit-backdrop-filter: blur(8px);
+        backdrop-filter: blur(8px);
+    }
+}
+</style>"""
+
+
+def _inject_dashboard_styles() -> None:
+    """Inject the same safe-to-repeat style block on every Streamlit rerun."""
+
+    st.markdown(_dashboard_styles(), unsafe_allow_html=True)
+
+
+def _presentation_marker(test_id: str, label: str) -> None:
+    """Add an accessible, stable presentation marker with escaped display text."""
+
+    st.markdown(
+        f'<div data-testid="{escape(test_id, quote=True)}">{escape(label)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 LEGAL_TRANSITIONS = {
     "OPEN": ("ACKNOWLEDGED", "DISMISSED"),
     "ACKNOWLEDGED": ("IN_PROGRESS", "DISMISSED"),
@@ -389,10 +510,15 @@ def _show_active_queue() -> None:
 
 
 def render_kpis(summary: Mapping[str, Any]) -> None:
-    columns = st.columns(4)
-    for index, (key, label, kind) in enumerate(KPI_DEFINITIONS):
-        with columns[index % 4]:
-            st.metric(label, _format_kpi(summary.get(key), kind))
+    _presentation_marker("dashboard-section", "Operational snapshot")
+    for band_index, band_label in enumerate(("Flow and service", "Exceptions and supply")):
+        with st.container(border=True):
+            _presentation_marker("dashboard-kpi-band", band_label)
+            columns = st.columns(4)
+            start = band_index * 4
+            for index, (key, label, kind) in enumerate(KPI_DEFINITIONS[start : start + 4]):
+                with columns[index]:
+                    st.metric(label, _format_kpi(summary.get(key), kind))
 
 
 def render_exception_detail(client: Any, exception_id: int) -> None:
@@ -404,6 +530,7 @@ def render_exception_detail(client: Any, exception_id: int) -> None:
             return
 
     st.subheader(f"Exception details · #{detail.get('id', exception_id)}")
+    _presentation_marker("dashboard-detail-surface", "Exception detail")
     st.write(f"**Business impact:** {detail.get('business_impact', '—')}")
     st.write(f"**Operational status:** {format_enum(detail.get('status'))}")
     left, right = st.columns(2)
@@ -418,8 +545,10 @@ def render_exception_detail(client: Any, exception_id: int) -> None:
 
     history = detail.get("history") or []
     if history:
+        _presentation_marker("dashboard-history", "Lifecycle history")
         st.subheader("Lifecycle history")
-        st.dataframe(_format_history_rows(history), hide_index=True, use_container_width=True)
+        with st.container(border=True):
+            st.dataframe(_format_history_rows(history), hide_index=True, use_container_width=True)
 
     if public_demo_read_only():
         st.info("The public demo is read-only; lifecycle updates are disabled.")
@@ -457,6 +586,7 @@ def render_exception_detail(client: Any, exception_id: int) -> None:
 def _supplier_context(client: Any, supplier_id: str, warehouse_id: str) -> None:
     if not supplier_id:
         return
+    _presentation_marker("dashboard-supplier-context", "Supplier context")
     st.subheader("Supplier context")
     filters = build_purchase_order_filters(supplier_id, warehouse_id)
     with st.spinner("Loading supplier purchase orders…"):
@@ -473,21 +603,26 @@ def _supplier_context(client: Any, supplier_id: str, warehouse_id: str) -> None:
     if not orders:
         st.info("No purchase orders match this supplier.")
         return
-    st.dataframe(_format_purchase_order_rows(orders), hide_index=True, use_container_width=True)
+    with st.container(border=True):
+        st.dataframe(_format_purchase_order_rows(orders), hide_index=True, use_container_width=True)
 
 
 def render_dashboard(client) -> None:
     """Render the complete dashboard; ``client`` is injectable for AppTest and fakes."""
 
     st.set_page_config(page_title="Operations Control Tower", layout="wide")
+    _inject_dashboard_styles()
+    _presentation_marker("dashboard-header", "Operations overview")
     st.title("Operations Control Tower")
     st.subheader("Prioritize operational exceptions, understand impact, and coordinate resolution.")
     if public_demo_read_only():
+        _presentation_marker("dashboard-read-only", "Public Demo · Read Only")
         st.caption("Public Demo · Read Only")
     filters, supplier_id, page_size = _sidebar_filters()
     warehouse_id = str(filters.pop("_warehouse_id", ""))
 
     st.header("Exception queue")
+    _presentation_marker("dashboard-queue-surface", "Exception queue")
     page = st.number_input("Queue page number", min_value=1, value=1, step=1, key="queue_page")
     with st.spinner("Loading exception queue…"):
         try:
@@ -515,6 +650,7 @@ def render_dashboard(client) -> None:
     st.caption(f"Queue evaluation: {format_timestamp(queue_evaluated_at)}")
     try:
         facet_counts = faceted_exception_counts(client, filters)
+        _presentation_marker("dashboard-facet-context", "Filter context")
         for dimension, _values, label in FACET_DEFINITIONS:
             st.caption(
                 f"{label}: "
@@ -532,7 +668,8 @@ def render_dashboard(client) -> None:
         st.info("No exceptions match this combination of filters.")
     else:
         frame = _format_queue_rows(rows)
-        st.dataframe(frame, hide_index=True, use_container_width=True)
+        with st.container(border=True):
+            st.dataframe(frame, hide_index=True, use_container_width=True)
         try:
             all_rows = _cache_get(
                 "exception_export", filters, lambda: client.get_all_exceptions(filters)
@@ -551,7 +688,8 @@ def render_dashboard(client) -> None:
             selected_id = st.selectbox(
                 "Select an exception", ids, format_func=lambda value: f"Exception #{value}"
             )
-            render_exception_detail(client, selected_id)
+            with st.container(border=True):
+                render_exception_detail(client, selected_id)
 
     _supplier_context(client, supplier_id, warehouse_id)
 
