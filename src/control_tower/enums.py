@@ -35,6 +35,35 @@ class OrderStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class OrderObservationStatus(StrEnum):
+    """Lifecycle/context states for source order observations."""
+
+    SOURCE_VALID = "SOURCE_VALID"
+    NORMALIZED = "NORMALIZED"
+    CONTEXT_INCOMPLETE = "CONTEXT_INCOMPLETE"
+    PROMOTED = "PROMOTED"
+    REJECTED_INVALID = "REJECTED_INVALID"
+    CONFLICT_BLOCKED = "CONFLICT_BLOCKED"
+
+
+class VersionComparison(StrEnum):
+    """Explicit source-version ordering outcomes; no implicit guessing."""
+
+    CURRENT_NEWER = "CURRENT_NEWER"
+    INCOMING_NEWER = "INCOMING_NEWER"
+    SAME = "SAME"
+    UNORDERED = "UNORDERED"
+
+
+class WarehouseCapability(StrEnum):
+    """Observed-versus-validated warehouse context states."""
+
+    OBSERVED = "WAREHOUSE_OBSERVED"
+    VALIDATED = "WAREHOUSE_VALIDATED"
+    UNKNOWN = "WAREHOUSE_UNKNOWN"
+    CONTEXT_UNAVAILABLE = "WAREHOUSE_CONTEXT_UNAVAILABLE"
+
+
 class PurchaseOrderStatus(StrEnum):
     OPEN = "OPEN"
     PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED"

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from sqlalchemy import BigInteger, Computed, Numeric
 
 from control_tower.db import Base
@@ -11,6 +13,7 @@ from control_tower.models import (
     Product,
     PurchaseOrderItem,
     Shipment,
+    SourceOrderIdentity,
     Warehouse,
 )
 
@@ -20,6 +23,9 @@ EXPECTED_TABLES = {
     "inventory",
     "inventory_movements",
     "orders",
+    "source_order_identities",
+    "order_observations",
+    "order_observation_receipts",
     "order_items",
     "suppliers",
     "purchase_orders",
@@ -57,6 +63,38 @@ def test_relationships_cover_operational_joins() -> None:
     assert "exception" in ExceptionHistory.__mapper__.relationships
     assert "order" in Shipment.__mapper__.relationships
     assert "purchase_order" in PurchaseOrderItem.__mapper__.relationships
+    assert "source_identity" in Order.__mapper__.relationships
+    assert "observations" in SourceOrderIdentity.__mapper__.relationships
+
+
+def test_order_observation_linkage_constraints_are_present() -> None:
+    order_columns = Order.__table__.c
+    assert {"source_namespace", "source_order_identity_id", "projected_source_version"} <= {
+        column.name for column in order_columns
+    }
+    assert order_columns.source_order_identity_id.nullable
+    assert order_columns.projected_source_version.nullable
+    assert order_columns.source_namespace.nullable
+
+
+def test_strategy_two_observation_migration_declares_complete_schema() -> None:
+    migration = Path("migrations/versions/20260911_01_order_observations.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'revision: str = "20260911_01"' in migration
+    assert 'down_revision: str | None = "20250827_02"' in migration
+    assert "CONFLICT_BLOCKED" in migration
+    assert "CREATE TABLE source_order_identities" in migration
+    assert "uq_source_order_identity_namespace_order" in migration
+    assert "CREATE TABLE order_observation_receipts" in migration
+    assert "uq_order_observation_receipt_observation_batch" in migration
+    assert "replay_identity_digest VARCHAR(64) NOT NULL" in migration
+    assert "uq_order_observations_replay_identity_digest" in migration
+    assert "idempotency_key" not in migration
+    assert "order_observations_source_batch" not in migration
+    assert "ADD COLUMN source_namespace VARCHAR(100)" in migration
+    assert "DEFAULT 'legacy'" not in migration
 
 
 def test_exception_identity_allows_same_issue_key_for_different_types() -> None:

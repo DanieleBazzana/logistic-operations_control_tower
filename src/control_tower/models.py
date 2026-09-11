@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -24,6 +25,10 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SAEnum,
 )
+from sqlalchemy import (
+    inspect as orm_inspect,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 from sqlalchemy.sql.dml import Delete, Update
@@ -34,6 +39,7 @@ from control_tower.enums import (
     ExceptionStatus,
     ExceptionType,
     InventoryMovementType,
+    OrderObservationStatus,
     OrderStatus,
     PurchaseOrderStatus,
     ShipmentStatus,
@@ -41,6 +47,7 @@ from control_tower.enums import (
 
 QUANTITY = Numeric(18, 3)
 MONEY = Numeric(14, 2)
+OBSERVATION_JSON = JSONB().with_variant(JSON(), "sqlite")
 
 
 def domain_enum(enum_class: type, name: str) -> SAEnum:
@@ -160,12 +167,44 @@ class InventoryMovement(TimestampMixin, Base):
     )
 
 
+class SourceOrderIdentity(TimestampMixin, Base):
+    """Authoritative identity of an order in one source namespace."""
+
+    __tablename__ = "source_order_identities"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    source_namespace: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    observations: Mapped[list["OrderObservation"]] = relationship(back_populates="source_identity")
+    orders: Mapped[list["Order"]] = relationship(back_populates="source_identity")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_namespace", "source_order_id", name="uq_source_order_identity_namespace_order"
+        ),
+    )
+
+
 class Order(TimestampMixin, Base):
     __tablename__ = "orders"
 
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_order_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    order_number: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    source_namespace: Mapped[str | None] = mapped_column(String(100))
+    source_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_order_identity_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_order_identities.id", ondelete="RESTRICT")
+    )
+    projected_source_version: Mapped[str | None] = mapped_column(String(100))
+    source_warehouse_id: Mapped[str | None] = mapped_column(String(100))
+    current_observation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("order_observations.id", ondelete="RESTRICT")
+    )
+    order_number: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[OrderStatus] = mapped_column(
         domain_enum(OrderStatus, "order_status"), nullable=False
     )
@@ -180,12 +219,22 @@ class Order(TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default=text("'USD'"))
 
     warehouse: Mapped[Warehouse] = relationship(back_populates="orders")
+    source_identity: Mapped[SourceOrderIdentity | None] = relationship(back_populates="orders")
+    current_observation: Mapped["OrderObservation | None"] = relationship(
+        foreign_keys=[current_observation_id], post_update=True
+    )
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
     shipments: Mapped[list["Shipment"]] = relationship(back_populates="order")
 
     __table_args__ = (
+        UniqueConstraint(
+            "source_namespace", "source_order_id", name="uq_orders_source_namespace_order"
+        ),
+        UniqueConstraint(
+            "source_namespace", "order_number", name="uq_orders_source_namespace_number"
+        ),
         CheckConstraint("total_amount >= 0", name="total_amount_non_negative"),
         CheckConstraint(
             "fulfilled_at IS NULL OR fulfilled_at >= ordered_at",
@@ -193,6 +242,185 @@ class Order(TimestampMixin, Base):
         ),
         Index("ix_orders_status_promised_at", "status", "promised_at"),
         Index("ix_orders_warehouse_status", "warehouse_id", "status"),
+    )
+
+
+class OrderObservation(TimestampMixin, Base):
+    """Internal source observation kept separate from the strict Order projection."""
+
+    __tablename__ = "order_observations"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    source_order_identity_id: Mapped[int] = mapped_column(
+        ForeignKey("source_order_identities.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_namespace: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_version: Mapped[str | None] = mapped_column(String(100))
+    source_row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    replay_identity: Mapped[list[str | None]] = mapped_column(OBSERVATION_JSON, nullable=False)
+    replay_identity_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    source_facts: Mapped[dict[str, object]] = mapped_column(OBSERVATION_JSON, nullable=False)
+    order_number: Mapped[str | None] = mapped_column(String(100))
+    order_status: Mapped[OrderStatus | None] = mapped_column(
+        domain_enum(OrderStatus, "order_status"), nullable=True
+    )
+    region: Mapped[str | None] = mapped_column(String(100))
+    source_warehouse_id: Mapped[str | None] = mapped_column(String(100))
+    warehouse_id: Mapped[int | None] = mapped_column(
+        ForeignKey("warehouses.id", ondelete="RESTRICT")
+    )
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    promised_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    total_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    currency: Mapped[str | None] = mapped_column(String(3))
+    status: Mapped[OrderObservationStatus] = mapped_column(
+        domain_enum(OrderObservationStatus, "order_observation_status"), nullable=False
+    )
+    source_status: Mapped[OrderObservationStatus] = mapped_column(
+        domain_enum(OrderObservationStatus, "order_observation_status"), nullable=False
+    )
+    capabilities: Mapped[dict[str, object]] = mapped_column(
+        OBSERVATION_JSON, nullable=False, default=dict
+    )
+    non_promotion_reasons: Mapped[list[str]] = mapped_column(
+        OBSERVATION_JSON, nullable=False, default=list
+    )
+    promoted_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("orders.id", ondelete="RESTRICT")
+    )
+    superseded_by_observation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("order_observations.id", ondelete="RESTRICT")
+    )
+    source_identity: Mapped[SourceOrderIdentity] = relationship(back_populates="observations")
+    warehouse: Mapped[Warehouse | None] = relationship()
+    superseded_by: Mapped["OrderObservation | None"] = relationship(
+        remote_side="OrderObservation.id", foreign_keys=[superseded_by_observation_id]
+    )
+    receipts: Mapped[list["OrderObservationReceipt"]] = relationship(back_populates="observation")
+
+    __table_args__ = (
+        CheckConstraint(
+            "total_amount IS NULL OR total_amount >= 0",
+            name="order_observations_total_amount_non_negative",
+        ),
+        CheckConstraint(
+            "fulfilled_at IS NULL OR ordered_at IS NULL OR fulfilled_at >= ordered_at",
+            name="order_observations_fulfilled_after_ordered",
+        ),
+        Index("ix_order_observations_status", "status"),
+        Index("ix_order_observations_source_order", "source_namespace", "source_order_id"),
+        Index("ix_order_observations_source_version", "source_order_identity_id", "source_version"),
+    )
+
+    @property
+    def observation_status(self) -> OrderObservationStatus:
+        """Compatibility/readability alias for the lifecycle status."""
+
+        return self.status
+
+    @observation_status.setter
+    def observation_status(self, value: OrderObservationStatus) -> None:
+        self.status = value
+
+
+_OBSERVATION_IMMUTABLE_FIELDS = (
+    "source_order_identity_id",
+    "source_namespace",
+    "source_order_id",
+    "source_version",
+    "source_row_hash",
+    "replay_identity",
+    "replay_identity_digest",
+    "source_facts",
+    "order_number",
+    "order_status",
+    "region",
+    "source_warehouse_id",
+    "ordered_at",
+    "promised_at",
+    "fulfilled_at",
+    "total_amount",
+    "currency",
+)
+
+
+@event.listens_for(OrderObservation, "before_update")
+def _prevent_order_observation_evidence_mutation(mapper, connection, target) -> None:
+    state = orm_inspect(target)
+    if any(state.attrs[field].history.has_changes() for field in _OBSERVATION_IMMUTABLE_FIELDS):
+        raise ValueError("order_observation evidence is immutable")
+
+
+@event.listens_for(OrderObservation, "before_delete")
+def _prevent_order_observation_delete(mapper, connection, target) -> None:
+    raise ValueError("order_observation evidence is append-only")
+
+
+@event.listens_for(OrderObservation.__table__, "after_create")
+def _create_sqlite_observation_guards(target, connection, **kwargs) -> None:
+    if connection.dialect.name != "sqlite":
+        return
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER order_observations_immutable_update
+        BEFORE UPDATE ON order_observations
+        WHEN OLD.source_order_identity_id IS NOT NEW.source_order_identity_id
+          OR OLD.source_namespace IS NOT NEW.source_namespace
+          OR OLD.source_order_id IS NOT NEW.source_order_id
+          OR OLD.source_version IS NOT NEW.source_version
+          OR OLD.source_row_hash IS NOT NEW.source_row_hash
+          OR OLD.replay_identity IS NOT NEW.replay_identity
+          OR OLD.replay_identity_digest IS NOT NEW.replay_identity_digest
+          OR OLD.source_facts IS NOT NEW.source_facts
+          OR OLD.order_number IS NOT NEW.order_number
+          OR OLD.order_status IS NOT NEW.order_status
+          OR OLD.region IS NOT NEW.region
+          OR OLD.source_warehouse_id IS NOT NEW.source_warehouse_id
+          OR OLD.ordered_at IS NOT NEW.ordered_at
+          OR OLD.promised_at IS NOT NEW.promised_at
+          OR OLD.fulfilled_at IS NOT NEW.fulfilled_at
+          OR OLD.total_amount IS NOT NEW.total_amount
+          OR OLD.currency IS NOT NEW.currency
+        BEGIN
+          SELECT RAISE(ABORT, 'order_observation evidence is immutable');
+        END
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER order_observations_append_only_delete
+        BEFORE DELETE ON order_observations
+        BEGIN
+          SELECT RAISE(ABORT, 'order_observation evidence is append-only');
+        END
+        """
+    )
+
+
+class OrderObservationReceipt(TimestampMixin, Base):
+    """Provenance receipt: one batch may receive one immutable observation."""
+
+    __tablename__ = "order_observation_receipts"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    observation_id: Mapped[int] = mapped_column(
+        ForeignKey("order_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+    batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    observation: Mapped[OrderObservation] = relationship(back_populates="receipts")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "observation_id", "batch_id", name="uq_order_observation_receipt_observation_batch"
+        ),
+        Index("ix_order_observation_receipts_batch", "batch_id"),
     )
 
 
@@ -478,11 +706,14 @@ __all__ = [
     "InventoryMovement",
     "Order",
     "OrderItem",
+    "OrderObservation",
+    "OrderObservationReceipt",
     "Product",
     "PurchaseOrder",
     "PurchaseOrderItem",
     "Shipment",
     "Supplier",
+    "SourceOrderIdentity",
     "SupplyChainException",
     "Warehouse",
 ]
