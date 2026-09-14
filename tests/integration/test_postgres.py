@@ -16,7 +16,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import func, inspect, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from control_tower.config import Settings, set_alembic_database_url
@@ -478,5 +478,344 @@ def test_concurrent_promotion_of_amount_10_and_20_keeps_one_newest_projection() 
                 )
                 == 1
             )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_postgresql_late_warehouse_registration_retries_context_incomplete_evidence() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set; start disposable PostgreSQL for this gate")
+    if not database_url.startswith("postgresql"):
+        pytest.fail("TEST_DATABASE_URL must be a PostgreSQL URL")
+
+    namespace = f"m076-late-warehouse-{uuid4().hex}"
+    source_order_id = f"late-warehouse-order-{uuid4().hex}"
+    source_warehouse_id = f"late-warehouse-source-{uuid4().hex}"
+    batch_id = f"late-warehouse-batch-{uuid4().hex}"
+    raw = {
+        **_complete_concurrency_row(source_order_id),
+        "source_warehouse_id": source_warehouse_id,
+    }
+    evidence_fields = (
+        "source_order_identity_id",
+        "source_namespace",
+        "source_order_id",
+        "source_version",
+        "source_row_hash",
+        "replay_identity",
+        "replay_identity_digest",
+        "source_facts",
+        "order_number",
+        "order_status",
+        "region",
+        "source_warehouse_id",
+        "ordered_at",
+        "promised_at",
+        "fulfilled_at",
+        "total_amount",
+        "currency",
+    )
+    engine = create_db_engine(Settings(database_url=database_url))
+    try:
+        with Session(engine) as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Warehouse)
+                    .where(Warehouse.source_warehouse_id == source_warehouse_id)
+                )
+                == 0
+            )
+            observation = stage_order_observation(
+                session, raw, source_namespace=namespace, batch_id=batch_id
+            )
+            session.commit()
+            observation_id = observation.id
+            evidence = {field: getattr(observation, field) for field in evidence_fields}
+
+            assert promote_order_observation(session, observation) is None
+            assert observation.status is OrderObservationStatus.CONTEXT_INCOMPLETE
+            session.commit()
+
+        with Session(engine) as session:
+            persisted = session.get(OrderObservation, observation_id)
+            assert persisted is not None
+            assert persisted.status is OrderObservationStatus.CONTEXT_INCOMPLETE
+            assert persisted.capabilities["warehouse"] == "WAREHOUSE_UNKNOWN"
+            assert {field: getattr(persisted, field) for field in evidence_fields} == evidence
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.source_namespace == namespace,
+                        Order.source_order_id == source_order_id,
+                    )
+                )
+                == 0
+            )
+
+            session.add(
+                Warehouse(
+                    source_warehouse_id=source_warehouse_id,
+                    code=f"M076-LW-{uuid4().hex[:12]}",
+                    name="M07.6 Late Warehouse",
+                    region="EU",
+                    timezone="UTC",
+                )
+            )
+            session.commit()
+
+        with Session(engine) as session:
+            persisted = session.get(OrderObservation, observation_id)
+            assert persisted is not None
+            promoted = promote_order_observation(session, persisted)
+            assert promoted is not None
+            assert persisted.status is OrderObservationStatus.PROMOTED
+            assert persisted.capabilities["warehouse"] == "WAREHOUSE_VALIDATED"
+            assert promoted.current_observation_id == observation_id
+            order_id = promoted.id
+            session.commit()
+
+        with Session(engine) as session:
+            persisted = session.get(OrderObservation, observation_id)
+            order = session.get(Order, order_id)
+            assert persisted is not None
+            assert order is not None
+            assert persisted.status is OrderObservationStatus.PROMOTED
+            assert persisted.capabilities["warehouse"] == "WAREHOUSE_VALIDATED"
+            assert order.current_observation_id == observation_id
+            assert {field: getattr(persisted, field) for field in evidence_fields} == evidence
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservation)
+                    .where(
+                        OrderObservation.source_namespace == namespace,
+                        OrderObservation.source_order_id == source_order_id,
+                    )
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservationReceipt)
+                    .where(OrderObservationReceipt.observation_id == observation_id)
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.source_namespace == namespace,
+                        Order.source_order_id == source_order_id,
+                    )
+                )
+                == 1
+            )
+
+            retried = promote_order_observation(session, persisted)
+            assert retried is not None
+            assert retried.id == order_id
+            session.commit()
+
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservation)
+                    .where(
+                        OrderObservation.source_namespace == namespace,
+                        OrderObservation.source_order_id == source_order_id,
+                    )
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservationReceipt)
+                    .where(OrderObservationReceipt.observation_id == observation_id)
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.source_namespace == namespace,
+                        Order.source_order_id == source_order_id,
+                    )
+                )
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_postgresql_historical_v1_retry_after_v2_current_preserves_v2_projection() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is not set; start disposable PostgreSQL for this gate")
+    if not database_url.startswith("postgresql"):
+        pytest.fail("TEST_DATABASE_URL must be a PostgreSQL URL")
+
+    namespace = f"m076-historical-v1-{uuid4().hex}"
+    source_order_id = f"historical-v1-order-{uuid4().hex}"
+    source_warehouse_id = f"historical-v1-warehouse-{uuid4().hex}"
+    raw = {
+        **_complete_concurrency_row(source_order_id),
+        "source_warehouse_id": source_warehouse_id,
+    }
+
+    def comparator(current: str | None, incoming: str | None) -> bool:
+        return current == "v1" and incoming == "v2"
+
+    engine = create_db_engine(Settings(database_url=database_url))
+    try:
+        with Session(engine) as session:
+            session.add(
+                Warehouse(
+                    source_warehouse_id=source_warehouse_id,
+                    code=f"M076-HV1-{uuid4().hex[:12]}",
+                    name="M07.6 Historical Version Warehouse",
+                    region="EU",
+                    timezone="UTC",
+                )
+            )
+            v1 = stage_order_observation(
+                session,
+                {**raw, "total_amount": "10.00"},
+                source_namespace=namespace,
+                source_version="v1",
+                batch_id=f"historical-v1-batch-{uuid4().hex}",
+            )
+            v1_order = promote_order_observation(session, v1)
+            assert v1_order is not None
+            session.commit()
+            v1_id = v1.id
+            v1_order_id = v1_order.id
+
+        with Session(engine) as session:
+            v2 = stage_order_observation(
+                session,
+                {**raw, "total_amount": "20.00"},
+                source_namespace=namespace,
+                source_version="v2",
+                batch_id=f"historical-v2-batch-{uuid4().hex}",
+            )
+            session.commit()
+            v2_id = v2.id
+
+        with Session(engine) as session:
+            v2 = session.get(OrderObservation, v2_id)
+            assert v2 is not None
+            current_order = promote_order_observation(session, v2, version_comparator=comparator)
+            assert current_order is not None
+            assert current_order.id == v1_order_id
+            assert current_order.current_observation_id == v2_id
+            session.commit()
+            order_id = current_order.id
+
+        with Session(engine) as session:
+            current_order = session.get(Order, order_id)
+            v1 = session.get(OrderObservation, v1_id)
+            v2 = session.get(OrderObservation, v2_id)
+            assert current_order is not None
+            assert v1 is not None
+            assert v2 is not None
+            assert current_order.current_observation_id == v2_id
+            assert current_order.projected_source_version == "v2"
+            assert v1.source_version == "v1"
+            assert v2.source_version == "v2"
+            assert v1.source_row_hash != v2.source_row_hash
+            strict_projection = {
+                field: getattr(current_order, field)
+                for field in (
+                    "source_order_identity_id",
+                    "source_namespace",
+                    "source_order_id",
+                    "projected_source_version",
+                    "order_number",
+                    "status",
+                    "region",
+                    "warehouse_id",
+                    "source_warehouse_id",
+                    "ordered_at",
+                    "promised_at",
+                    "fulfilled_at",
+                    "total_amount",
+                    "currency",
+                )
+            }
+
+            try:
+                historical_retry = promote_order_observation(
+                    session, v1, version_comparator=comparator
+                )
+            except IntegrityError as error:
+                pytest.fail(f"historical v1 retry raised IntegrityError: {error}")
+            assert historical_retry is None
+            session.commit()
+
+            current_order = session.get(Order, order_id)
+            v1 = session.get(OrderObservation, v1_id)
+            v2 = session.get(OrderObservation, v2_id)
+            assert current_order is not None
+            assert v1 is not None
+            assert v2 is not None
+            assert current_order.current_observation_id == v2_id
+            assert current_order.current_observation_id != v1_id
+            assert current_order.projected_source_version == "v2"
+            assert v1.status is OrderObservationStatus.PROMOTED
+            assert v1.promoted_order_id == order_id
+            assert v1.superseded_by_observation_id == v2_id
+            assert v2.status is OrderObservationStatus.PROMOTED
+            for field, expected in strict_projection.items():
+                assert getattr(current_order, field) == expected
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.source_namespace == namespace,
+                        Order.source_order_id == source_order_id,
+                    )
+                )
+                == 1
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservation)
+                    .where(
+                        OrderObservation.source_namespace == namespace,
+                        OrderObservation.source_order_id == source_order_id,
+                    )
+                )
+                == 2
+            )
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(OrderObservationReceipt)
+                    .where(OrderObservationReceipt.observation_id.in_([v1_id, v2_id]))
+                )
+                == 2
+            )
+            queryable_observations = session.scalars(
+                select(OrderObservation).where(
+                    OrderObservation.source_namespace == namespace,
+                    OrderObservation.source_order_id == source_order_id,
+                    OrderObservation.id.in_([v1_id, v2_id]),
+                )
+            ).all()
+            assert {observation.id for observation in queryable_observations} == {v1_id, v2_id}
     finally:
         engine.dispose()
