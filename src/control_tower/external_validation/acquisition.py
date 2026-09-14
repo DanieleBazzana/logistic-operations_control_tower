@@ -6,19 +6,20 @@ import csv
 import hashlib
 import json
 import stat
+from importlib import resources
 from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-MANIFEST_DIR = Path(__file__).resolve().parents[3] / "docs" / "external-validation" / "manifests"
+MANIFEST_DIR = resources.files("control_tower.external_validation").joinpath("manifests")
 
 
 def load_manifest(dataset: str) -> dict[str, Any]:
     """Load a committed metadata manifest, not an external dataset."""
 
-    path = MANIFEST_DIR / f"{dataset}.json"
     if dataset not in {"olist", "dataco"}:
         raise ValueError(f"unsupported dataset: {dataset}")
+    path = MANIFEST_DIR.joinpath(f"{dataset}.json")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
