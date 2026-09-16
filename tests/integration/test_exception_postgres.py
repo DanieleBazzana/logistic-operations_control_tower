@@ -54,8 +54,8 @@ def test_m073_postgres_standard_bootstrap_retains_all_findings_and_seeds_four_st
                 session.scalar(select(func.count()).select_from(ExceptionRecord)) or 0
             )
             assert observed_total > 0
-            assert first["detections"] == 514
-            assert first["created"] == 514
+            assert first["detections"] == 127
+            assert first["created"] == 127
             assert first["updated"] == 0
             assert first["skipped"] == 0
             assert first["created"] == first["detections"]
@@ -100,9 +100,9 @@ def test_m073_postgres_standard_bootstrap_retains_all_findings_and_seeds_four_st
             settings=settings,
         )
         assert second["committed"]
-        assert second["detections"] == 514
+        assert second["detections"] == 127
         assert second["created"] == 0
-        assert second["updated"] == 512
+        assert second["updated"] == 125
         assert second["skipped"] == 2
         with Session(engine) as session:
             assert (

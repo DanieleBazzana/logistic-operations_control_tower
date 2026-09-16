@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +17,24 @@ from control_tower.synthetic.artifacts import ARTIFACT_COLUMNS, write_artifact_r
 
 DEFAULT_OUTPUT_DIR = Path("data/generated")
 SCHEMA_VERSION = "m02.v1"
+
+
+@dataclass(frozen=True)
+class ScenarioProfile:
+    """Default scale for a varied but still quick-to-load demo network."""
+
+    product_count: int = 240
+    warehouse_count: int = 4
+    supplier_count: int = 12
+    order_count: int = 1500
+
+
+DEFAULT_PROFILE = ScenarioProfile()
+WAREHOUSE_ORDER_SHARES = (0.40, 0.30, 0.20, 0.10)
+OPEN_ORDER_PERIOD = 7
+HEALTHY_COMMITMENT_PERIOD = 21
+AT_RISK_COMMITMENT_PERIOD = 14
+OVERDUE_SHIPMENT_PERIOD = 210
 
 
 def _utc(value: datetime | str | None, default: datetime) -> datetime:
@@ -44,16 +63,33 @@ def _row_count(manifest: dict[str, Any], name: str) -> int:
     return manifest["artifacts"][name]["row_count"]
 
 
+def _warehouse_for_order(number: int, profile: ScenarioProfile) -> str:
+    """Assign demand deterministically with a concentrated primary network node."""
+
+    if profile.warehouse_count > len(WAREHOUSE_ORDER_SHARES):
+        warehouse_number = ((number - 1) % profile.warehouse_count) + 1
+    else:
+        position = (number - 1) / profile.order_count
+        cumulative = 0.0
+        warehouse_number = profile.warehouse_count
+        for index, share in enumerate(WAREHOUSE_ORDER_SHARES[: profile.warehouse_count], start=1):
+            cumulative += share
+            if position < cumulative:
+                warehouse_number = index
+                break
+    return f"W{warehouse_number:03d}"
+
+
 def generate(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     *,
     seed: int | None = None,
     as_of: datetime | str | None = None,
     settings: Settings | None = None,
-    product_count: int = 200,
-    warehouse_count: int = 3,
-    supplier_count: int = 10,
-    order_count: int = 1200,
+    product_count: int | None = None,
+    warehouse_count: int | None = None,
+    supplier_count: int | None = None,
+    order_count: int | None = None,
 ) -> dict[str, Any]:
     """Generate a deterministic fixture and return its manifest.
 
@@ -64,6 +100,14 @@ def generate(
     configured = settings or Settings()
     actual_seed = configured.deterministic_seed if seed is None else seed
     actual_as_of = _utc(as_of, configured.as_of)
+    profile = ScenarioProfile(
+        product_count=DEFAULT_PROFILE.product_count if product_count is None else product_count,
+        warehouse_count=DEFAULT_PROFILE.warehouse_count
+        if warehouse_count is None
+        else warehouse_count,
+        supplier_count=DEFAULT_PROFILE.supplier_count if supplier_count is None else supplier_count,
+        order_count=DEFAULT_PROFILE.order_count if order_count is None else order_count,
+    )
     minimums = {
         "product_count": 3,
         "warehouse_count": 1,
@@ -71,10 +115,10 @@ def generate(
         "order_count": 4,
     }
     dimensions = {
-        "product_count": product_count,
-        "warehouse_count": warehouse_count,
-        "supplier_count": supplier_count,
-        "order_count": order_count,
+        "product_count": profile.product_count,
+        "warehouse_count": profile.warehouse_count,
+        "supplier_count": profile.supplier_count,
+        "order_count": profile.order_count,
     }
     if any(dimensions[name] < minimum for name, minimum in minimums.items()):
         requirements = ", ".join(f"{name}>={minimum}" for name, minimum in minimums.items())
@@ -84,7 +128,7 @@ def generate(
     output.mkdir(parents=True, exist_ok=True)
 
     products: list[dict[str, Any]] = []
-    for number in range(1, product_count + 1):
+    for number in range(1, profile.product_count + 1):
         price = Decimal(rng.randint(500, 25000)) / Decimal(100)
         products.append(
             {
@@ -98,21 +142,21 @@ def generate(
         )
 
     warehouses: list[dict[str, Any]] = []
-    for number in range(1, warehouse_count + 1):
+    for number in range(1, profile.warehouse_count + 1):
         warehouses.append(
             {
                 "source_warehouse_id": f"W{number:03d}",
                 "code": f"WH-{number:03d}",
                 "name": f"Warehouse {number:03d}",
-                "region": ["NORTH", "SOUTH", "WEST"][number - 1]
-                if number <= 3
+                "region": ["NORTH", "SOUTH", "WEST", "EAST"][number - 1]
+                if number <= 4
                 else f"REGION-{number:03d}",
                 "timezone": "UTC",
             }
         )
 
     suppliers: list[dict[str, Any]] = []
-    for number in range(1, supplier_count + 1):
+    for number in range(1, profile.supplier_count + 1):
         suppliers.append(
             {
                 "source_supplier_id": f"SUP{number:03d}",
@@ -125,9 +169,20 @@ def generate(
 
     inventory: list[dict[str, Any]] = []
     movements: list[dict[str, Any]] = []
-    for warehouse_number in range(1, warehouse_count + 1):
-        for product_number in range(1, product_count + 1):
-            if warehouse_number == 1 and product_number == 1:
+    for warehouse_number in range(1, profile.warehouse_count + 1):
+        for product_number in range(1, profile.product_count + 1):
+            scarce_stock = {
+                (1, 1): Decimal("5"),
+                (1, 2): Decimal("100"),
+                (1, 3): Decimal("150"),
+                (1, 4): Decimal("8"),
+                (2, 5): Decimal("8"),
+                (3, 6): Decimal("8"),
+                (4, 7): Decimal("8"),
+            }
+            if (warehouse_number, product_number) in scarce_stock:
+                on_hand, reserved = scarce_stock[(warehouse_number, product_number)], Decimal("0")
+            elif warehouse_number == 1 and product_number == 1:
                 on_hand, reserved = Decimal("5"), Decimal("0")
             elif warehouse_number == 1 and product_number == 2:
                 on_hand, reserved = Decimal("100"), Decimal("0")
@@ -177,30 +232,30 @@ def generate(
                     "reference_id": f"{product_id}-{warehouse_id}",
                 }
             )
-    # This one movement makes the snapshot/movement reconstruction intentionally differ.
-    movements.append(
-        {
-            "source_movement_id": f"MOV{len(movements) + 1:06d}",
-            "source_product_id": "P0003",
-            "source_warehouse_id": "W001",
-            "movement_type": "ADJUSTMENT_IN",
-            "quantity": "25.000",
-            "occurred_at": _timestamp(actual_as_of - timedelta(days=1)),
-            "reference_type": "MISMATCH_FIXTURE",
-            "reference_id": "P0003-W001",
-        }
-    )
+    # These movements make snapshot/movement reconstruction intentionally differ
+    # in several nodes, making reconciliation a network-wide operational story.
+    for product_number, warehouse_number in ((3, 1), (5, 2), (6, 3), (7, 4)):
+        if product_number > profile.product_count or warehouse_number > profile.warehouse_count:
+            continue
+        movements.append(
+            {
+                "source_movement_id": f"MOV{len(movements) + 1:06d}",
+                "source_product_id": f"P{product_number:04d}",
+                "source_warehouse_id": f"W{warehouse_number:03d}",
+                "movement_type": "ADJUSTMENT_IN",
+                "quantity": "25.000",
+                "occurred_at": _timestamp(actual_as_of - timedelta(days=1)),
+                "reference_type": "MISMATCH_FIXTURE",
+                "reference_id": f"P{product_number:04d}-W{warehouse_number:03d}",
+            }
+        )
 
     orders: list[dict[str, Any]] = []
     order_items: list[dict[str, Any]] = []
-    for number in range(1, order_count + 1):
+    for number in range(1, profile.order_count + 1):
         source_order_id = f"O{number:06d}"
-        warehouse_id = f"W{(number % warehouse_count) + 1:03d}"
-        status = (
-            "OPEN"
-            if number <= max(10, order_count // 4)
-            else ("FULFILLED" if number % 5 else "OPEN")
-        )
+        warehouse_id = _warehouse_for_order(number, profile)
+        status = "OPEN" if number <= 3 or number % OPEN_ORDER_PERIOD == 0 else "FULFILLED"
         if number == 1:
             warehouse_id, ordered_at, promised_at = (
                 "W001",
@@ -221,16 +276,31 @@ def generate(
             )
         else:
             ordered_at = actual_as_of - timedelta(days=rng.randint(1, 45), hours=rng.randint(0, 20))
-            promised_at = ordered_at + timedelta(days=rng.randint(2, 8))
+            if status == "OPEN":
+                if number % HEALTHY_COMMITMENT_PERIOD == 0:
+                    promised_at = actual_as_of + timedelta(days=rng.randint(3, 8))
+                elif number % AT_RISK_COMMITMENT_PERIOD == 0:
+                    promised_at = actual_as_of + timedelta(hours=rng.randint(1, 48))
+                else:
+                    promised_at = max(
+                        ordered_at,
+                        actual_as_of - timedelta(hours=rng.randint(1, 72)),
+                    )
+            else:
+                promised_at = ordered_at + timedelta(days=rng.randint(2, 8))
         fulfilled_at = None
         if status == "FULFILLED":
-            fulfilled_at = promised_at - timedelta(hours=rng.randint(0, 48))
+            if number % 17 == 0:
+                fulfilled_at = promised_at + timedelta(hours=rng.randint(6, 30))
+            else:
+                fulfilled_at = promised_at - timedelta(hours=rng.randint(0, 48))
+            fulfilled_at = min(fulfilled_at, actual_as_of)
             if fulfilled_at < ordered_at:
-                fulfilled_at = ordered_at + timedelta(hours=2)
+                fulfilled_at = ordered_at
         item_count = 1 if number <= 3 else rng.randint(1, 4)
         item_values: list[tuple[int, Decimal, Decimal]] = []
         for line_number in range(1, item_count + 1):
-            product_number = ((number * 7 + line_number * 11) % product_count) + 1
+            product_number = ((number * 7 + line_number * 11) % profile.product_count) + 1
             quantity = Decimal(rng.randint(1, 12))
             if number == 1 and line_number == 1:
                 product_number, quantity = 1, Decimal("50")
@@ -271,21 +341,39 @@ def generate(
 
     purchase_orders: list[dict[str, Any]] = []
     purchase_order_items: list[dict[str, Any]] = []
-    po_count = max(30, supplier_count * 4)
+    po_count = max(30, profile.supplier_count * 5)
+    pressure_warehouse = 3 if profile.warehouse_count >= 3 else 1
+    regular_warehouses = [number for number in (1, 2, 4) if number <= profile.warehouse_count]
+    if not regular_warehouses:
+        regular_warehouses = list(range(1, profile.warehouse_count + 1))
     for number in range(1, po_count + 1):
         source_po_id = f"PO{number:06d}"
         ordered_at = actual_as_of - timedelta(days=rng.randint(5, 60))
-        status = "RECEIVED" if number % 4 else "PARTIALLY_RECEIVED"
-        expected = ordered_at + timedelta(days=rng.randint(3, 20))
-        received = expected + timedelta(days=1) if status == "RECEIVED" else None
+        supplier_number = ((number - 1) % profile.supplier_count) + 1
+        pressure_supplier = supplier_number <= min(3, profile.supplier_count)
+        if pressure_supplier:
+            status = "OPEN" if number % 2 else "PARTIALLY_RECEIVED"
+            expected = max(actual_as_of - timedelta(days=rng.randint(2, 14)), ordered_at)
+            received = None if status == "OPEN" else min(expected + timedelta(days=1), actual_as_of)
+            warehouse_number = pressure_warehouse
+        else:
+            status = "PARTIALLY_RECEIVED" if number % 3 == 0 else "RECEIVED"
+            expected = min(ordered_at + timedelta(days=rng.randint(3, 20)), actual_as_of)
+            received = None if status == "OPEN" else min(expected + timedelta(days=1), actual_as_of)
+            warehouse_number = regular_warehouses[(number - 1) % len(regular_warehouses)]
         if number == 1:
-            status, expected, received = "OPEN", actual_as_of - timedelta(days=3), None
+            status, expected, received, warehouse_number = (
+                "OPEN",
+                actual_as_of - timedelta(days=3),
+                None,
+                pressure_warehouse,
+            )
         purchase_orders.append(
             {
                 "source_purchase_order_id": source_po_id,
                 "po_number": f"PO-{number:06d}",
-                "source_supplier_id": f"SUP{((number - 1) % supplier_count) + 1:03d}",
-                "source_warehouse_id": f"W{((number - 1) % warehouse_count) + 1:03d}",
+                "source_supplier_id": f"SUP{supplier_number:03d}",
+                "source_warehouse_id": f"W{warehouse_number:03d}",
                 "status": status,
                 "ordered_at": _timestamp(ordered_at),
                 "expected_delivery_at": _timestamp(expected),
@@ -294,7 +382,7 @@ def generate(
         )
         item_count = rng.randint(1, 3)
         for line_number in range(1, item_count + 1):
-            product_number = ((number * 13 + line_number) % product_count) + 1
+            product_number = ((number * 13 + line_number) % profile.product_count) + 1
             quantity = Decimal(rng.randint(20, 150))
             received_quantity = (
                 quantity if status == "RECEIVED" else (quantity / 2).quantize(Decimal("0.001"))
@@ -317,7 +405,7 @@ def generate(
     shipments: list[dict[str, Any]] = []
     carriers = ("DHL", "FEDEX", "UPS", "USPS")
     for number, order in enumerate(orders, start=1):
-        if number % 7 == 0 or number <= 5:
+        if number % 2 == 0 or number <= 5:
             if number == 4:
                 shipped_at, eta, status, delivered_at = (
                     actual_as_of - timedelta(days=6),
@@ -327,9 +415,29 @@ def generate(
                 )
             else:
                 shipped_at = datetime.fromisoformat(order["ordered_at"]) + timedelta(days=1)
-                eta = datetime.fromisoformat(order["promised_at"])
                 status = "DELIVERED" if order["status"] == "FULFILLED" else "IN_TRANSIT"
-                delivered_at = eta if status == "DELIVERED" else None
+                if status == "IN_TRANSIT":
+                    eta = (
+                        actual_as_of - timedelta(hours=12)
+                        if number % OVERDUE_SHIPMENT_PERIOD == 0
+                        else actual_as_of + timedelta(days=rng.randint(1, 5))
+                    )
+                    if shipped_at > eta:
+                        shipped_at = eta - timedelta(hours=1)
+                else:
+                    eta = datetime.fromisoformat(order["promised_at"])
+                delivered_at = (
+                    min(
+                        max(
+                            eta,
+                            datetime.fromisoformat(order["fulfilled_at"]),
+                            shipped_at,
+                        ),
+                        actual_as_of,
+                    )
+                    if status == "DELIVERED"
+                    else None
+                )
             shipments.append(
                 {
                     "source_shipment_id": f"SHP{len(shipments) + 1:06d}",
