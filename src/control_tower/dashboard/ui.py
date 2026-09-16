@@ -262,7 +262,7 @@ def build_exception_filters(
 
 
 def faceted_exception_counts(
-    client: Any, filters: Mapping[str, Any]
+    client: Any, filters: Mapping[str, Any], *, as_of: str | None = None
 ) -> dict[str, dict[str, int]]:
     """Read contextual facet counts from the existing paginated API total."""
 
@@ -272,10 +272,15 @@ def faceted_exception_counts(
         counts[dimension] = {}
         for value in values:
             query = {**contextual, dimension: [value]}
+            cache_query = {**query}
+            request = {"page": 1, "page_size": 1, "filters": query}
+            if as_of is not None:
+                cache_query["as_of"] = as_of
+                request["as_of"] = as_of
             body = _cache_get(
                 "facet",
-                query,
-                lambda query=query: client.list_exceptions(page=1, page_size=1, filters=query),
+                cache_query,
+                lambda request=request: client.list_exceptions(**request),
             )
             counts[dimension][value] = int(body.get("total", 0))
     return counts
@@ -332,14 +337,29 @@ def format_timestamp(value: Any) -> str:
     if value is None or value == "":
         return "—"
     try:
-        timestamp = value if isinstance(value, datetime) else datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")
+        timestamp = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         )
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             return str(value)
         return timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         return str(value)
+
+
+def _normalize_summary_as_of(value: Any) -> str:
+    if value is None:
+        raise ValueError("summary response is missing as_of")
+    timestamp = (
+        value
+        if isinstance(value, datetime)
+        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    )
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("summary as_of must include a timezone")
+    return timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def format_confidence(value: Any) -> str:
@@ -621,6 +641,16 @@ def render_dashboard(client) -> None:
     filters, supplier_id, page_size = _sidebar_filters()
     warehouse_id = str(filters.pop("_warehouse_id", ""))
 
+    with st.spinner("Loading operational summary…"):
+        try:
+            summary = _cache_get("summary", {}, lambda: client.summary())
+        except DashboardAPIError as error:
+            st.error(f"Unable to load the operational summary. {error}")
+            return
+    summary_as_of = _normalize_summary_as_of(summary.get("as_of"))
+    render_kpis(summary)
+    st.caption(f"KPI snapshot: {format_timestamp(summary_as_of)}")
+
     st.header("Exception queue")
     _presentation_marker("dashboard-queue-surface", "Exception queue")
     page = st.number_input("Queue page number", min_value=1, value=1, step=1, key="queue_page")
@@ -628,28 +658,18 @@ def render_dashboard(client) -> None:
         try:
             body = _cache_get(
                 "exceptions",
-                {**filters, "page": page, "page_size": page_size},
-                lambda: client.list_exceptions(page=page, page_size=page_size, filters=filters),
+                {**filters, "as_of": summary_as_of, "page": page, "page_size": page_size},
+                lambda: client.list_exceptions(
+                    page=page, page_size=page_size, filters=filters, as_of=summary_as_of
+                ),
             )
         except DashboardAPIError as error:
             st.error(f"Unable to load the exception queue. {error}")
             return
     rows = body.get("items", [])
-    queue_evaluated_at = datetime.now(timezone.utc)
-
-    with st.spinner("Loading operational summary…"):
-        try:
-            summary = _cache_get(
-                "summary", {}, lambda: client.summary()
-            )
-        except DashboardAPIError as error:
-            st.error(f"Unable to load the operational summary. {error}")
-            return
-    render_kpis(summary)
-    st.caption(f"KPI snapshot: {format_timestamp(summary.get('as_of'))}")
-    st.caption(f"Queue evaluation: {format_timestamp(queue_evaluated_at)}")
+    st.caption(f"Queue evaluation: {format_timestamp(summary_as_of)}")
     try:
-        facet_counts = faceted_exception_counts(client, filters)
+        facet_counts = faceted_exception_counts(client, filters, as_of=summary_as_of)
         _presentation_marker("dashboard-facet-context", "Filter context")
         for dimension, _values, label in FACET_DEFINITIONS:
             st.caption(
@@ -671,8 +691,11 @@ def render_dashboard(client) -> None:
         with st.container(border=True):
             st.dataframe(frame, hide_index=True, use_container_width=True)
         try:
+            export_filters = {**filters, "as_of": summary_as_of}
             all_rows = _cache_get(
-                "exception_export", filters, lambda: client.get_all_exceptions(filters)
+                "exception_export",
+                export_filters,
+                lambda: client.get_all_exceptions(export_filters),
             )
             st.download_button(
                 "Download queue CSV",

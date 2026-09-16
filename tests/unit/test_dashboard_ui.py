@@ -75,15 +75,19 @@ SUMMARY_FALLBACK_AS_OF = "2025-01-15T12:00:00Z"
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, *, summary_as_of=SUMMARY_FALLBACK_AS_OF):
         self.updated = []
         self.status = "OPEN"
         self.list_calls = []
         self.summary_calls = []
+        self.export_calls = []
+        self.events = []
+        self.summary_as_of = summary_as_of
 
     def summary(self, **kwargs):
         self.summary_calls.append(kwargs)
-        as_of = kwargs.get("as_of", SUMMARY_FALLBACK_AS_OF)
+        self.events.append(("summary", kwargs))
+        as_of = kwargs.get("as_of", self.summary_as_of)
         if isinstance(as_of, datetime):
             as_of = as_of.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         return {
@@ -103,9 +107,12 @@ class FakeClient:
 
     def list_exceptions(self, **kwargs):
         self.list_calls.append(kwargs)
+        self.events.append(("queue", kwargs))
         return {"items": [EXCEPTION], "page": 1, "page_size": 25, "total": 1}
 
     def get_all_exceptions(self, filters=None):
+        self.export_calls.append(filters)
+        self.events.append(("export", filters))
         return [EXCEPTION]
 
     def get_exception(self, exception_id):
@@ -176,13 +183,35 @@ def _disable_public_demo(monkeypatch):
     monkeypatch.delenv("PUBLIC_DEMO_READ_ONLY", raising=False)
 
 
-def test_dashboard_requests_kpis_independently_from_queue_snapshot():
+def test_dashboard_loads_summary_before_queue_and_propagates_its_anchor():
     client = FakeClient()
 
     test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
 
     assert test_app.exception == []
     assert client.summary_calls == [{}]
+    assert client.events[0] == ("summary", {})
+    queue_calls = [kwargs for kind, kwargs in client.events if kind == "queue"]
+    assert queue_calls
+    assert all(call["as_of"] == SUMMARY_FALLBACK_AS_OF for call in queue_calls)
+    assert client.export_calls == [
+        {"status": list(dashboard_ui.ACTIVE_STATUSES), "as_of": SUMMARY_FALLBACK_AS_OF}
+    ]
+
+
+def test_dashboard_normalizes_summary_anchor_for_queue_and_captions():
+    client = FakeClient(summary_as_of="2025-03-01T12:00:00+02:00")
+
+    test_app = AppTest.from_function(_run_dashboard, args=(client,)).run()
+
+    assert test_app.exception == []
+    queue_calls = [kwargs for kind, kwargs in client.events if kind == "queue"]
+    assert all(call["as_of"] == "2025-03-01T10:00:00Z" for call in queue_calls)
+    assert client.export_calls == [
+        {"status": list(dashboard_ui.ACTIVE_STATUSES), "as_of": "2025-03-01T10:00:00Z"}
+    ]
+    assert "KPI snapshot: 2025-03-01 10:00 UTC" in [item.value for item in test_app.caption]
+    assert "Queue evaluation: 2025-03-01 10:00 UTC" in [item.value for item in test_app.caption]
 
 
 def test_dashboard_keeps_queue_snapshot_when_filters_change():

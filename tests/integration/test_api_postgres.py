@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -239,6 +239,17 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
             )
             shipments = await client.get("/api/v1/shipments", params={"warehouse_id": "W001"})
             exceptions = await client.get("/api/v1/exceptions", params={"page_size": 1})
+            exceptions_at_anchor = await client.get(
+                "/api/v1/exceptions",
+                params={
+                    "as_of": AS_OF.isoformat(),
+                    "detected_to": (AS_OF + timedelta(days=1)).isoformat(),
+                },
+            )
+            exceptions_before_anchor = await client.get(
+                "/api/v1/exceptions",
+                params={"as_of": (AS_OF - timedelta(microseconds=1)).isoformat()},
+            )
             exception_detail = await client.get(f"/api/v1/exceptions/{active_id}")
             kpi = await client.get("/api/v1/kpis/summary", params={"as_of": AS_OF.isoformat()})
             kpi_repeat = await client.get(
@@ -276,6 +287,10 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
         assert exceptions.status_code == 200 and exceptions.json()["total"] >= len(
             detection.detections
         )
+        assert exceptions_at_anchor.status_code == 200
+        assert exceptions_at_anchor.json()["total"] == len(detection.detections)
+        assert exceptions_before_anchor.status_code == 200
+        assert exceptions_before_anchor.json()["total"] == 0
         assert exception_detail.status_code == 200
         assert kpi.status_code == kpi_repeat.status_code == 200
         assert kpi.json() == kpi_repeat.json()

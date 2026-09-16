@@ -139,6 +139,23 @@ def api_client():
                     warehouse_id=1,
                     product_id=1,
                 ),
+                ExceptionRecord(
+                    id=2,
+                    deduplication_key="key-2",
+                    exception_type=ExceptionType.SHIPMENT_DELAY,
+                    issue_key="O3",
+                    entity_type="order",
+                    entity_id="O3",
+                    severity=ExceptionSeverity.MEDIUM,
+                    status=ExceptionStatus.OPEN,
+                    detected_at=AS_OF + timedelta(hours=1),
+                    business_impact="Future shipment delay",
+                    revenue_at_risk=Decimal("10.00"),
+                    orders_affected=1,
+                    root_cause="Future delay",
+                    recommended_action="Monitor",
+                    confidence=Decimal("0.8000"),
+                ),
             ]
         )
         session.commit()
@@ -302,6 +319,44 @@ async def test_collection_filters_cover_inventory_po_shipments_and_exceptions(ap
     assert exceptions.status_code == 200 and exceptions.json()["total"] == 1
     assert paged.status_code == 200
     assert paged.json()["items"][0]["source_order_id"] == "O2"
+
+
+@pytest.mark.anyio
+async def test_exception_queue_defaults_as_of_to_settings_anchor(api_client):
+    async with api_client as client:
+        response = await client.get("/api/v1/exceptions")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert [row["id"] for row in response.json()["items"]] == [1]
+
+
+@pytest.mark.anyio
+async def test_exception_queue_explicit_as_of_excludes_rows_after_anchor(api_client):
+    async with api_client as client:
+        response = await client.get(
+            "/api/v1/exceptions", params={"as_of": (AS_OF - timedelta(minutes=1)).isoformat()}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    assert response.json()["items"] == []
+
+
+@pytest.mark.anyio
+async def test_exception_queue_detected_to_cannot_widen_as_of_scope(api_client):
+    async with api_client as client:
+        response = await client.get(
+            "/api/v1/exceptions",
+            params={
+                "as_of": AS_OF.isoformat(),
+                "detected_to": (AS_OF + timedelta(days=1)).isoformat(),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert [row["id"] for row in response.json()["items"]] == [1]
 
 
 @pytest.mark.anyio

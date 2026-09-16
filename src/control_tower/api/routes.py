@@ -360,7 +360,14 @@ def exceptions(
     warehouse_id: str | None = None,
     detected_from: datetime | None = None,
     detected_to: datetime | None = None,
+    settings: Settings = Depends(get_settings),
+    as_of: datetime | None = None,
 ) -> Page[ExceptionOut]:
+    resolved_as_of = _normalize_filter(as_of) if as_of is not None else settings.as_of
+    caller_detected_to = _normalize_filter(detected_to)
+    effective_detected_to = min(
+        value for value in (caller_detected_to, resolved_as_of) if value is not None
+    )
     rows, total = queries.list_exceptions(
         session,
         page=page,
@@ -374,7 +381,7 @@ def exceptions(
         product_source_id=source_product_id,
         warehouse_source_id=warehouse_id,
         detected_from=_normalize_filter(detected_from),
-        detected_to=_normalize_filter(detected_to),
+        detected_to=effective_detected_to,
     )
     return Page(
         items=[_exception_out(row) for row in rows], page=page, page_size=page_size, total=total

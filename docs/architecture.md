@@ -128,6 +128,13 @@ performance, open exceptions, critical exceptions, revenue at risk, stockout ris
 supplier delays, and shipment delays. Revenue at risk is a finding-level sum, not a
 distinct-order financial total.
 
+`GET /exceptions` accepts the same optional timezone-aware `as_of` anchor. When
+omitted, it resolves from `Settings.as_of`; `detected_at` is filtered inclusively
+through that anchor. A caller-provided `detected_from` remains the inclusive lower
+bound, while `detected_to` is an additional upper bound intersected with the anchor
+(the earlier upper bound wins). Exception lifecycle filtering remains current-status
+based; the queue does not time-travel status history.
+
 ### M05 dashboard boundary
 
 `DashboardClient` is a bounded-timeout HTTPX client with safe error mapping and
@@ -136,9 +143,13 @@ receives an injectable client for AppTest coverage. It renders the eight KPIs,
 filtered/paginated Exception Queue, all-page CSV export, supplier purchase-order
 context, exception detail/history, and explicit loading/error/empty states.
 
-The dashboard does not import SQLAlchemy models or open a database connection. Its
-lifecycle form sends actor, target status, and reason to the API; successful writes
-increment a session data version, clear cached reads, and rerender.
+The dashboard does not import SQLAlchemy models or open a database connection. It loads
+`GET /kpis/summary` before the Exception Queue, uses the response's normalized `as_of`
+for queue pagination, facet totals, and all-page CSV export, and labels KPI and queue
+captions with that shared anchor. Queue pagination and filters remain independent of KPI
+calculation while lifecycle status remains current-status based. Its lifecycle form sends
+actor, target status, and reason to the API; successful writes increment a session data
+version, clear cached reads, and rerender.
 
 ### M06 release boundary
 
