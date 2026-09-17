@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import BigInteger, Computed, Numeric
+from sqlalchemy import BigInteger, Computed, Numeric, UniqueConstraint
 
 from control_tower.db import Base
 from control_tower.enums import ExceptionStatus, ExceptionType
@@ -18,6 +18,8 @@ from control_tower.models import (
 )
 
 EXPECTED_TABLES = {
+    "dataset_versions",
+    "dataset_activation",
     "products",
     "warehouses",
     "inventory",
@@ -104,7 +106,11 @@ def test_exception_identity_allows_same_issue_key_for_different_types() -> None:
         if index.name == "uq_exceptions_active_type_issue_key"
     )
 
-    assert {column.name for column in active_index.columns} == {"exception_type", "issue_key"}
+    assert {column.name for column in active_index.columns} == {
+        "dataset_version_id",
+        "exception_type",
+        "issue_key",
+    }
     assert "OPEN" in str(active_index.dialect_options["postgresql"]["where"])
     assert ExceptionType.INVENTORY_SHORTAGE.value == "INVENTORY_SHORTAGE"
     assert ExceptionStatus.OPEN.value == "OPEN"
@@ -119,5 +125,22 @@ def test_order_and_purchase_order_bounds_are_constrained() -> None:
 
 
 def test_source_identifiers_are_unique() -> None:
-    assert Product.__table__.c.source_product_id.unique
-    assert Warehouse.__table__.c.source_warehouse_id.unique
+    product_constraints = {
+        constraint.name: constraint for constraint in Product.__table__.constraints
+    }
+    warehouse_constraints = {
+        constraint.name: constraint for constraint in Warehouse.__table__.constraints
+    }
+
+    product_source_constraint = product_constraints["uq_products_source_product_id"]
+    warehouse_source_constraint = warehouse_constraints["uq_warehouses_source_warehouse_id"]
+    assert isinstance(product_source_constraint, UniqueConstraint)
+    assert isinstance(warehouse_source_constraint, UniqueConstraint)
+    assert {column.name for column in product_source_constraint.columns} == {
+        "dataset_version_id",
+        "source_product_id",
+    }
+    assert {column.name for column in warehouse_source_constraint.columns} == {
+        "dataset_version_id",
+        "source_warehouse_id",
+    }
