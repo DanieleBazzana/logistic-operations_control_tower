@@ -18,6 +18,7 @@ from control_tower.models import (
     Shipment,
     Warehouse,
 )
+from control_tower.replacement.service import scope_statement
 
 
 def _page_query(
@@ -45,6 +46,7 @@ def list_orders(
     warehouse_source_id: str | None = None,
     ordered_from: Any = None,
     ordered_to: Any = None,
+    dataset_version_id: int | None = None,
 ) -> tuple[list[Order], int]:
     statement = (
         select(Order)
@@ -55,6 +57,7 @@ def list_orders(
             selectinload(Order.shipments),
         )
     )
+    statement = scope_statement(statement, Order, dataset_version_id)
     if statuses:
         statement = statement.where(Order.status.in_(statuses))
     if region is not None:
@@ -68,8 +71,10 @@ def list_orders(
     return _page_query(session, statement, Order, page, page_size, (Order.source_order_id,))
 
 
-def get_order(session: Session, source_order_id: str) -> Order | None:
-    return session.scalar(
+def get_order(
+    session: Session, source_order_id: str, *, dataset_version_id: int | None = None
+) -> Order | None:
+    statement = (
         select(Order)
         .join(Order.warehouse)
         .options(
@@ -79,6 +84,7 @@ def get_order(session: Session, source_order_id: str) -> Order | None:
         )
         .where(Order.source_order_id == source_order_id)
     )
+    return session.scalar(scope_statement(statement, Order, dataset_version_id))
 
 
 def list_inventory(
@@ -92,6 +98,7 @@ def list_inventory(
     available_max: Any = None,
     observed_from: Any = None,
     observed_to: Any = None,
+    dataset_version_id: int | None = None,
 ) -> tuple[list[Inventory], int]:
     statement = (
         select(Inventory)
@@ -99,6 +106,7 @@ def list_inventory(
         .join(Inventory.warehouse)
         .options(joinedload(Inventory.product), joinedload(Inventory.warehouse))
     )
+    statement = scope_statement(statement, Inventory, dataset_version_id)
     if product_source_id is not None:
         statement = statement.where(Inventory.product.has(source_product_id=product_source_id))
     if sku is not None:
@@ -137,10 +145,12 @@ def list_purchase_orders(
     ordered_to: Any = None,
     remaining_min: Any = None,
     remaining_max: Any = None,
+    dataset_version_id: int | None = None,
 ) -> tuple[list[PurchaseOrder], int]:
     statement = select(PurchaseOrder).options(
         joinedload(PurchaseOrder.supplier), joinedload(PurchaseOrder.warehouse)
     )
+    statement = scope_statement(statement, PurchaseOrder, dataset_version_id)
     if statuses:
         statement = statement.where(PurchaseOrder.status.in_(statuses))
     if supplier_source_id is not None:
@@ -200,8 +210,10 @@ def list_shipments(
     warehouse_source_id: str | None = None,
     eta_from: Any = None,
     eta_to: Any = None,
+    dataset_version_id: int | None = None,
 ) -> tuple[list[Shipment], int]:
     statement = select(Shipment).options(joinedload(Shipment.order).joinedload(Order.warehouse))
+    statement = scope_statement(statement, Shipment, dataset_version_id)
     if statuses:
         statement = statement.where(Shipment.status.in_(statuses))
     if carrier is not None:
@@ -236,10 +248,12 @@ def list_exceptions(
     warehouse_source_id: str | None = None,
     detected_from: Any = None,
     detected_to: Any = None,
+    dataset_version_id: int | None = None,
 ) -> tuple[list[ExceptionRecord], int]:
     statement = select(ExceptionRecord).options(
         joinedload(ExceptionRecord.warehouse), joinedload(ExceptionRecord.product)
     )
+    statement = scope_statement(statement, ExceptionRecord, dataset_version_id)
     if exception_types:
         statement = statement.where(ExceptionRecord.exception_type.in_(exception_types))
     if severities:
@@ -267,8 +281,10 @@ def list_exceptions(
     return _page_query(session, statement, ExceptionRecord, page, page_size, (ExceptionRecord.id,))
 
 
-def get_exception(session: Session, exception_id: int) -> ExceptionRecord | None:
-    return session.scalar(
+def get_exception(
+    session: Session, exception_id: int, *, dataset_version_id: int | None = None
+) -> ExceptionRecord | None:
+    statement = (
         select(ExceptionRecord)
         .options(
             joinedload(ExceptionRecord.warehouse),
@@ -277,3 +293,4 @@ def get_exception(session: Session, exception_id: int) -> ExceptionRecord | None
         )
         .where(ExceptionRecord.id == exception_id)
     )
+    return session.scalar(scope_statement(statement, ExceptionRecord, dataset_version_id))

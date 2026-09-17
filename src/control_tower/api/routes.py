@@ -36,6 +36,7 @@ from control_tower.enums import (
 )
 from control_tower.exceptions.lifecycle import InvalidTransition, transition_exception
 from control_tower.kpis.service import KPIService
+from control_tower.replacement.service import active_dataset_version_id
 
 router = APIRouter()
 SessionDependency = Annotated[Session, Depends(get_session)]
@@ -224,6 +225,7 @@ def orders(
     ordered_from: datetime | None = None,
     ordered_to: datetime | None = None,
 ) -> Page[OrderOut]:
+    dataset_version_id = active_dataset_version_id(session)
     rows, total = queries.list_orders(
         session,
         page=page,
@@ -233,6 +235,7 @@ def orders(
         warehouse_source_id=warehouse_id,
         ordered_from=_normalize_filter(ordered_from),
         ordered_to=_normalize_filter(ordered_to),
+        dataset_version_id=dataset_version_id,
     )
     return Page(
         items=[_order_out(row) for row in rows], page=page, page_size=page_size, total=total
@@ -241,7 +244,8 @@ def orders(
 
 @router.get("/orders/{source_order_id}", response_model=OrderOut)
 def order_detail(source_order_id: str, session: SessionDependency) -> OrderOut:
-    row = queries.get_order(session, source_order_id)
+    dataset_version_id = active_dataset_version_id(session)
+    row = queries.get_order(session, source_order_id, dataset_version_id=dataset_version_id)
     if row is None:
         raise HTTPException(status_code=404, detail="order not found")
     return _order_out(row)
@@ -259,6 +263,7 @@ def inventory(
     observed_from: datetime | None = None,
     observed_to: datetime | None = None,
 ) -> Page[InventoryOut]:
+    dataset_version_id = active_dataset_version_id(session)
     rows, total = queries.list_inventory(
         session,
         page=page,
@@ -269,6 +274,7 @@ def inventory(
         available_max=available_max,
         observed_from=_normalize_filter(observed_from),
         observed_to=_normalize_filter(observed_to),
+        dataset_version_id=dataset_version_id,
     )
     return Page(
         items=[_inventory_out(row) for row in rows], page=page, page_size=page_size, total=total
@@ -294,6 +300,7 @@ def purchase_orders(
     remaining_quantity_min: Decimal | None = None,
     remaining_quantity_max: Decimal | None = None,
 ) -> Page[PurchaseOrderOut]:
+    dataset_version_id = active_dataset_version_id(session)
     rows, total = queries.list_purchase_orders(
         session,
         page=page,
@@ -307,6 +314,7 @@ def purchase_orders(
         ordered_to=_normalize_filter(ordered_to or date_to),
         remaining_min=remaining_min if remaining_min is not None else remaining_quantity_min,
         remaining_max=remaining_max if remaining_max is not None else remaining_quantity_max,
+        dataset_version_id=dataset_version_id,
     )
     return Page(
         items=[_purchase_order_out(row) for row in rows],
@@ -328,6 +336,7 @@ def shipments(
     eta_from: datetime | None = None,
     eta_to: datetime | None = None,
 ) -> Page[ShipmentOut]:
+    dataset_version_id = active_dataset_version_id(session)
     rows, total = queries.list_shipments(
         session,
         page=page,
@@ -338,6 +347,7 @@ def shipments(
         warehouse_source_id=warehouse_id,
         eta_from=_normalize_filter(eta_from),
         eta_to=_normalize_filter(eta_to),
+        dataset_version_id=dataset_version_id,
     )
     return Page(
         items=[_shipment_out(row) for row in rows], page=page, page_size=page_size, total=total
@@ -363,6 +373,7 @@ def exceptions(
     settings: Settings = Depends(get_settings),
     as_of: datetime | None = None,
 ) -> Page[ExceptionOut]:
+    dataset_version_id = active_dataset_version_id(session)
     resolved_as_of = _normalize_filter(as_of) if as_of is not None else settings.as_of
     caller_detected_to = _normalize_filter(detected_to)
     effective_detected_to = min(
@@ -382,6 +393,7 @@ def exceptions(
         warehouse_source_id=warehouse_id,
         detected_from=_normalize_filter(detected_from),
         detected_to=effective_detected_to,
+        dataset_version_id=dataset_version_id,
     )
     return Page(
         items=[_exception_out(row) for row in rows], page=page, page_size=page_size, total=total
@@ -390,7 +402,8 @@ def exceptions(
 
 @router.get("/exceptions/{exception_id}", response_model=ExceptionOut)
 def exception_detail(exception_id: int, session: SessionDependency) -> ExceptionOut:
-    row = queries.get_exception(session, exception_id)
+    dataset_version_id = active_dataset_version_id(session)
+    row = queries.get_exception(session, exception_id, dataset_version_id=dataset_version_id)
     if row is None:
         raise HTTPException(status_code=404, detail="exception not found")
     return _exception_out(row, include_history=True)
@@ -405,6 +418,7 @@ def exception_status(
 ) -> ExceptionOut:
     if settings.public_demo_read_only:
         raise HTTPException(status_code=403, detail="public demo is read-only")
+    dataset_version_id = active_dataset_version_id(session)
     try:
         row = transition_exception(
             session,
@@ -412,6 +426,7 @@ def exception_status(
             payload.status,
             actor=payload.actor,
             reason=payload.reason,
+            dataset_version_id=dataset_version_id,
         )
         session.commit()
     except LookupError:
@@ -423,7 +438,10 @@ def exception_status(
     except ValueError:
         session.rollback()
         raise HTTPException(status_code=422, detail="invalid lifecycle request")
-    return _exception_out(queries.get_exception(session, row.id) or row, include_history=True)
+    return _exception_out(
+        queries.get_exception(session, row.id, dataset_version_id=dataset_version_id) or row,
+        include_history=True,
+    )
 
 
 @router.get("/kpis/summary", response_model=KpiSummaryOut)
@@ -433,4 +451,9 @@ def kpi_summary(
     as_of: datetime | None = None,
 ) -> KpiSummaryOut:
     effective_as_of = _normalize_filter(as_of) if as_of is not None else settings.as_of
-    return KpiSummaryOut(**KPIService(session).summary(effective_as_of))
+    dataset_version_id = active_dataset_version_id(session)
+    return KpiSummaryOut(
+        **KPIService(session).summary(
+            effective_as_of, dataset_version_id=dataset_version_id
+        )
+    )

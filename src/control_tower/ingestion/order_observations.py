@@ -22,12 +22,14 @@ from control_tower.enums import (
     WarehouseCapability,
 )
 from control_tower.models import (
+    DATASET_SCOPE_EXPLICIT_KEY,
     Order,
     OrderObservation,
     OrderObservationReceipt,
     SourceOrderIdentity,
     Warehouse,
 )
+from control_tower.replacement.service import active_dataset_version_id
 
 _ORDER_STATUSES = {status.value for status in OrderStatus}
 _STATUS_ALIASES = {
@@ -41,6 +43,14 @@ _STATUS_ALIASES = {
 }
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _MAX_CONFLICT_RETRIES = 3
+
+
+def _scope(model: type[object], dataset_version_id: int | None):
+    return (
+        (model.dataset_version_id == dataset_version_id,)
+        if dataset_version_id is not None
+        else ()
+    )
 
 
 def _canonical_value(value: Any, *, field_name: str | None = None) -> Any:
@@ -395,13 +405,18 @@ def assess_order_observation(
 
 
 def _get_or_create_identity(
-    session: Session, namespace: str, source_order_id: str
+    session: Session,
+    namespace: str,
+    source_order_id: str,
+    *,
+    dataset_version_id: int | None = None,
 ) -> SourceOrderIdentity:
     statement = (
         select(SourceOrderIdentity)
         .where(
             SourceOrderIdentity.source_namespace == namespace,
             SourceOrderIdentity.source_order_id == source_order_id,
+            *_scope(SourceOrderIdentity, dataset_version_id),
         )
         .with_for_update()
     )
@@ -412,7 +427,9 @@ def _get_or_create_identity(
         try:
             with session.begin_nested():
                 identity = SourceOrderIdentity(
-                    source_namespace=namespace, source_order_id=source_order_id
+                    source_namespace=namespace,
+                    source_order_id=source_order_id,
+                    dataset_version_id=dataset_version_id,
                 )
                 session.add(identity)
                 session.flush()
@@ -430,16 +447,33 @@ def _get_or_create_identity(
 def _receipt(session: Session, observation: OrderObservation, batch_id: str) -> None:
     """Create a separate provenance receipt, safely idempotent per batch."""
 
+    dataset_version_id = observation.dataset_version_id
+    existing = session.scalar(
+        select(OrderObservationReceipt).where(
+            OrderObservationReceipt.observation_id == observation.id,
+            OrderObservationReceipt.batch_id == batch_id,
+            *_scope(OrderObservationReceipt, dataset_version_id),
+        )
+    )
+    if existing is not None:
+        return
     for attempt in range(_MAX_CONFLICT_RETRIES):
         try:
             with session.begin_nested():
-                session.add(OrderObservationReceipt(observation=observation, batch_id=batch_id))
+                session.add(
+                    OrderObservationReceipt(
+                        observation_id=observation.id,
+                        batch_id=batch_id,
+                        dataset_version_id=dataset_version_id,
+                    )
+                )
                 session.flush()
         except IntegrityError:
             exists = session.scalar(
                 select(OrderObservationReceipt).where(
                     OrderObservationReceipt.observation_id == observation.id,
                     OrderObservationReceipt.batch_id == batch_id,
+                    *_scope(OrderObservationReceipt, dataset_version_id),
                 )
             )
             if exists is not None:
@@ -457,9 +491,14 @@ def stage_order_observation(
     source_namespace: str,
     batch_id: str,
     source_version: str | None = None,
+    dataset_version_id: int | None = None,
 ) -> OrderObservation:
     """Persist immutable evidence and a batch receipt; exact evidence replays one row."""
 
+    if dataset_version_id is None and session.info.get(DATASET_SCOPE_EXPLICIT_KEY):
+        raise ValueError("dataset_version_id is required for candidate/replacement writes")
+    if dataset_version_id is None:
+        dataset_version_id = active_dataset_version_id(session)
     assessment = assess_order_observation(
         raw,
         source_namespace=source_namespace,
@@ -474,7 +513,12 @@ def stage_order_observation(
         )
     namespace = item.source_namespace
     source_order_id = item.source_order_id
-    identity = _get_or_create_identity(session, namespace, source_order_id)
+    identity = _get_or_create_identity(
+        session,
+        namespace,
+        source_order_id,
+        dataset_version_id=dataset_version_id,
+    )
     replay_identity = canonical_replay_identity(
         namespace, source_order_id, item.source_version, item.source_row_hash
     )
@@ -482,13 +526,17 @@ def stage_order_observation(
         namespace, source_order_id, item.source_version, item.source_row_hash
     )
     existing = session.scalar(
-        select(OrderObservation).where(OrderObservation.replay_identity_digest == digest)
+        select(OrderObservation).where(
+            OrderObservation.replay_identity_digest == digest,
+            *_scope(OrderObservation, dataset_version_id),
+        )
     )
     if existing is not None:
         _receipt(session, existing, _text(batch_id) or "")
         return existing
 
     staged = OrderObservation(
+        dataset_version_id=dataset_version_id,
         source_order_identity_id=identity.id,
         source_namespace=namespace,
         source_order_id=source_order_id,
@@ -518,7 +566,10 @@ def stage_order_observation(
                 session.flush()
         except IntegrityError:
             existing = session.scalar(
-                select(OrderObservation).where(OrderObservation.replay_identity_digest == digest)
+                select(OrderObservation).where(
+                    OrderObservation.replay_identity_digest == digest,
+                    *_scope(OrderObservation, dataset_version_id),
+                )
             )
             if existing is not None:
                 _receipt(session, existing, _text(batch_id) or "")
@@ -614,6 +665,7 @@ def promote_order_observation(
     *,
     version_comparator: Callable[[str | None, str | None], VersionComparison | str | bool]
     | None = None,
+    dataset_version_id: int | None = None,
 ) -> Order | None:
     """Promote evidence only when projection semantics are explicitly proven.
 
@@ -622,14 +674,26 @@ def promote_order_observation(
     never ordered by lexical/numeric/arrival/batch/timestamp heuristics.
     """
 
+    if dataset_version_id is None:
+        dataset_version_id = active_dataset_version_id(session)
     locked = session.scalar(
-        select(OrderObservation).where(OrderObservation.id == observation.id).with_for_update()
+        select(OrderObservation)
+        .where(
+            OrderObservation.id == observation.id,
+            *_scope(OrderObservation, dataset_version_id),
+        )
+        .with_for_update()
     )
     if locked is None:
         return None
     observation = locked
     if observation.status is OrderObservationStatus.PROMOTED and observation.promoted_order_id:
-        order = session.get(Order, observation.promoted_order_id)
+        order = session.scalar(
+            select(Order).where(
+                Order.id == observation.promoted_order_id,
+                *_scope(Order, dataset_version_id),
+            )
+        )
         if order is not None and all(
             (
                 observation.promoted_order_id == order.id,
@@ -651,7 +715,10 @@ def promote_order_observation(
 
     identity = session.scalar(
         select(SourceOrderIdentity)
-        .where(SourceOrderIdentity.id == observation.source_order_identity_id)
+        .where(
+            SourceOrderIdentity.id == observation.source_order_identity_id,
+            *_scope(SourceOrderIdentity, dataset_version_id),
+        )
         .with_for_update()
     )
     if identity is None:
@@ -659,7 +726,10 @@ def promote_order_observation(
         return None
     all_observations = list(
         session.scalars(
-            select(OrderObservation).where(OrderObservation.source_order_identity_id == identity.id)
+            select(OrderObservation).where(
+                OrderObservation.source_order_identity_id == identity.id,
+                *_scope(OrderObservation, dataset_version_id),
+            )
         )
     )
     conflict = _same_version_conflict(all_observations, observation)
@@ -668,7 +738,10 @@ def promote_order_observation(
         return None
 
     warehouse = session.scalar(
-        select(Warehouse).where(Warehouse.source_warehouse_id == observation.source_warehouse_id)
+        select(Warehouse).where(
+            Warehouse.source_warehouse_id == observation.source_warehouse_id,
+            *_scope(Warehouse, dataset_version_id),
+        )
     )
     if warehouse is not None:
         observation.warehouse_id = warehouse.id
@@ -702,7 +775,12 @@ def promote_order_observation(
             return None
         observation.status = OrderObservationStatus.NORMALIZED
     order = session.scalar(
-        select(Order).where(Order.source_order_identity_id == identity.id).with_for_update()
+        select(Order)
+        .where(
+            Order.source_order_identity_id == identity.id,
+            *_scope(Order, dataset_version_id),
+        )
+        .with_for_update()
     )
     if order is None:
         order = session.scalar(
@@ -710,6 +788,7 @@ def promote_order_observation(
             .where(
                 Order.source_namespace == identity.source_namespace,
                 Order.source_order_id == identity.source_order_id,
+                *_scope(Order, dataset_version_id),
             )
             .with_for_update()
         )
@@ -781,6 +860,7 @@ def promote_order_observation(
             fulfilled_at=observation.fulfilled_at,
             total_amount=observation.total_amount,
             currency=observation.currency,
+            dataset_version_id=dataset_version_id,
         )
         try:
             with session.begin_nested():
@@ -798,7 +878,8 @@ def promote_order_observation(
                             Order.source_namespace == identity.source_namespace,
                             Order.order_number == observation.order_number,
                         ),
-                    )
+                    ),
+                    *_scope(Order, dataset_version_id),
                 )
             )
             if conflicting is None:
@@ -819,7 +900,10 @@ def promote_order_observation(
     if previous_current_id is not None and previous_current_id != observation.id:
         previous_current = session.scalar(
             select(OrderObservation)
-            .where(OrderObservation.id == previous_current_id)
+            .where(
+                OrderObservation.id == previous_current_id,
+                *_scope(OrderObservation, dataset_version_id),
+            )
             .with_for_update()
         )
         if previous_current is not None:
@@ -837,13 +921,17 @@ def promote_staged_order_observations(
     *,
     version_comparator: Callable[[str | None, str | None], VersionComparison | str | bool]
     | None = None,
+    dataset_version_id: int | None = None,
 ) -> list[Order]:
     """Promote supplied observations without treating iteration order as source order."""
 
     promoted: list[Order] = []
     for observation in observations:
         order = promote_order_observation(
-            session, observation, version_comparator=version_comparator
+            session,
+            observation,
+            version_comparator=version_comparator,
+            dataset_version_id=dataset_version_id,
         )
         if order is not None:
             promoted.append(order)

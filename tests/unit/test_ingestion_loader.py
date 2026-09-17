@@ -14,7 +14,7 @@ _PRODUCT_ROW = {
 
 
 def test_product_source_id_stays_scalar_during_model_transformation() -> None:
-    product = _row_to_model("oms/products.csv", _PRODUCT_ROW, {"products": {}})
+    product = _row_to_model("oms/products.csv", _PRODUCT_ROW, {"products": {}}, 1)
 
     assert isinstance(product, Product)
     assert product.source_product_id == "P0001"

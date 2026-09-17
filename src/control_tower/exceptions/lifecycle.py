@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from control_tower.db import utc_now
 from control_tower.enums import ExceptionStatus
 from control_tower.exceptions.contracts import normalize_as_of
 from control_tower.models import ExceptionHistory, ExceptionRecord
+from control_tower.replacement.service import active_dataset_version_id
 
 LEGAL_TRANSITIONS: dict[ExceptionStatus, frozenset[ExceptionStatus]] = {
     ExceptionStatus.OPEN: frozenset({ExceptionStatus.ACKNOWLEDGED, ExceptionStatus.DISMISSED}),
@@ -34,6 +36,7 @@ def transition_exception(
     actor: str,
     reason: str | None = None,
     changed_at: datetime | None = None,
+    dataset_version_id: int | None = None,
 ) -> ExceptionRecord:
     """Lock, validate, update, and audit exactly one lifecycle transition."""
 
@@ -44,7 +47,12 @@ def transition_exception(
     if to_status in (ExceptionStatus.RESOLVED, ExceptionStatus.DISMISSED) and not reason_value:
         raise ValueError("reason is required when resolving or dismissing an exception")
     instant = normalize_as_of(changed_at) if changed_at is not None else utc_now()
-    record = session.get(ExceptionRecord, exception_id, with_for_update=True)
+    if dataset_version_id is None:
+        dataset_version_id = active_dataset_version_id(session)
+    statement = select(ExceptionRecord).where(ExceptionRecord.id == exception_id)
+    if dataset_version_id is not None:
+        statement = statement.where(ExceptionRecord.dataset_version_id == dataset_version_id)
+    record = session.scalar(statement.with_for_update())
     if record is None:
         raise LookupError(f"exception {exception_id} does not exist")
     if to_status not in LEGAL_TRANSITIONS[record.status]:
@@ -56,6 +64,7 @@ def transition_exception(
     session.add(
         ExceptionHistory(
             exception_id=record.id,
+            dataset_version_id=record.dataset_version_id,
             from_status=from_status,
             to_status=to_status,
             changed_at=instant,
@@ -81,6 +90,7 @@ class ExceptionLifecycle:
         actor: str,
         reason: str | None = None,
         changed_at: datetime | None = None,
+        dataset_version_id: int | None = None,
     ) -> ExceptionRecord:
         return transition_exception(
             self.session,
@@ -89,6 +99,7 @@ class ExceptionLifecycle:
             actor=actor,
             reason=reason,
             changed_at=changed_at,
+            dataset_version_id=dataset_version_id,
         )
 
 

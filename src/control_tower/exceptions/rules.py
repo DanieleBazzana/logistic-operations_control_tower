@@ -47,13 +47,25 @@ def _aware(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _scope(model: type[object], dataset_version_id: int | None):
+    return (
+        (model.dataset_version_id == dataset_version_id,)
+        if dataset_version_id is not None
+        else ()
+    )
+
+
 def _overdue_hours(as_of: datetime, due: datetime) -> Decimal:
     seconds = max(Decimal("0"), Decimal(str((as_of - due).total_seconds())))
     return (seconds / Decimal("3600")).quantize(Decimal("0.0001"))
 
 
 def detect_sla_breach_risk(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     """Find open, incompletely fulfilled orders due or within the risk window."""
 
@@ -73,6 +85,8 @@ def detect_sla_breach_risk(
             Order.ordered_at <= instant,
             Order.promised_at <= risk_end,
             remaining > 0,
+            *_scope(Order, dataset_version_id),
+            *_scope(OrderItem, dataset_version_id),
         )
         .group_by(Order.id)
         .order_by(Order.source_order_id)
@@ -113,7 +127,7 @@ def detect_sla_breach_risk(
     )
 
 
-def _open_demand(session: Session, instant: datetime):
+def _open_demand(session: Session, instant: datetime, dataset_version_id: int | None = None):
     remaining = OrderItem.ordered_quantity - OrderItem.fulfilled_quantity
     return (
         select(
@@ -128,6 +142,8 @@ def _open_demand(session: Session, instant: datetime):
             Order.status == OrderStatus.OPEN,
             Order.ordered_at <= instant,
             remaining > 0,
+            *_scope(Order, dataset_version_id),
+            *_scope(OrderItem, dataset_version_id),
         )
         .group_by(OrderItem.product_id, Order.warehouse_id)
         .subquery("open_demand")
@@ -135,10 +151,14 @@ def _open_demand(session: Session, instant: datetime):
 
 
 def _inventory_demand_detections(
-    session: Session, as_of: datetime, settings: Settings, exception_type: ExceptionType
+    session: Session,
+    as_of: datetime,
+    settings: Settings,
+    exception_type: ExceptionType,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     instant = normalize_as_of(as_of)
-    demand = _open_demand(session, instant)
+    demand = _open_demand(session, instant, dataset_version_id)
     rows = session.execute(
         select(
             Product,
@@ -155,7 +175,12 @@ def _inventory_demand_detections(
             & (Inventory.warehouse_id == demand.c.warehouse_id),
         )
         .join(Warehouse, Warehouse.id == demand.c.warehouse_id)
-        .where(Inventory.observed_at <= instant)
+        .where(
+            Inventory.observed_at <= instant,
+            *_scope(Product, dataset_version_id),
+            *_scope(Warehouse, dataset_version_id),
+            *_scope(Inventory, dataset_version_id),
+        )
         .order_by(Product.source_product_id, Warehouse.source_warehouse_id)
     ).all()
     detections: list[ExceptionDetection] = []
@@ -210,23 +235,43 @@ def _inventory_demand_detections(
 
 
 def detect_inventory_shortage(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     return _inventory_demand_detections(
-        session, as_of, settings or Settings(), ExceptionType.INVENTORY_SHORTAGE
+        session,
+        as_of,
+        settings or Settings(),
+        ExceptionType.INVENTORY_SHORTAGE,
+        dataset_version_id,
     )
 
 
 def detect_stockout_risk(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     return _inventory_demand_detections(
-        session, as_of, settings or Settings(), ExceptionType.STOCKOUT_RISK
+        session,
+        as_of,
+        settings or Settings(),
+        ExceptionType.STOCKOUT_RISK,
+        dataset_version_id,
     )
 
 
 def detect_inventory_mismatch(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     instant = normalize_as_of(as_of)
     configured = settings or Settings()
@@ -234,7 +279,12 @@ def detect_inventory_mismatch(
         select(Inventory, Product, Warehouse)
         .join(Product, Product.id == Inventory.product_id)
         .join(Warehouse, Warehouse.id == Inventory.warehouse_id)
-        .where(Inventory.observed_at <= instant)
+        .where(
+            Inventory.observed_at <= instant,
+            *_scope(Inventory, dataset_version_id),
+            *_scope(Product, dataset_version_id),
+            *_scope(Warehouse, dataset_version_id),
+        )
         .order_by(
             Product.source_product_id,
             Warehouse.source_warehouse_id,
@@ -270,6 +320,7 @@ def detect_inventory_mismatch(
                     InventoryMovement.product_id == inventory.product_id,
                     InventoryMovement.warehouse_id == inventory.warehouse_id,
                     InventoryMovement.occurred_at <= inventory.observed_at,
+                    *_scope(InventoryMovement, dataset_version_id),
                 )
             )
         )
@@ -306,7 +357,11 @@ def detect_inventory_mismatch(
 
 
 def detect_supplier_delay(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     instant = normalize_as_of(as_of)
     rows = session.execute(
@@ -324,6 +379,8 @@ def detect_supplier_delay(
             PurchaseOrder.ordered_at <= instant,
             PurchaseOrder.expected_delivery_at < instant,
             PurchaseOrderItem.received_quantity < PurchaseOrderItem.ordered_quantity,
+            *_scope(PurchaseOrder, dataset_version_id),
+            *_scope(PurchaseOrderItem, dataset_version_id),
         )
         .group_by(PurchaseOrder.id)
         .order_by(PurchaseOrder.source_purchase_order_id)
@@ -361,7 +418,11 @@ def detect_supplier_delay(
 
 
 def detect_shipment_delay(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     instant = normalize_as_of(as_of)
     remaining = OrderItem.ordered_quantity - OrderItem.fulfilled_quantity
@@ -373,7 +434,12 @@ def detect_shipment_delay(
         )
         .join(Order, Order.id == Shipment.order_id)
         .outerjoin(OrderItem, OrderItem.order_id == Order.id)
-        .where(Shipment.status != ShipmentStatus.DELIVERED, Shipment.eta < instant)
+        .where(
+            Shipment.status != ShipmentStatus.DELIVERED,
+            Shipment.eta < instant,
+            *_scope(Shipment, dataset_version_id),
+            *_scope(Order, dataset_version_id),
+        )
         .group_by(Shipment.id, Order.id)
         .order_by(Shipment.source_shipment_id)
     ).all()
@@ -408,7 +474,7 @@ def detect_shipment_delay(
     )
 
 
-Rule = Callable[[Session, datetime, Settings | None], tuple[ExceptionDetection, ...]]
+Rule = Callable[..., tuple[ExceptionDetection, ...]]
 RULES: tuple[Rule, ...] = (
     detect_sla_breach_risk,
     detect_inventory_shortage,
@@ -420,7 +486,11 @@ RULES: tuple[Rule, ...] = (
 
 
 def detect_all(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> tuple[ExceptionDetection, ...]:
     """Run all six rules in stable rule/entity order."""
 
@@ -428,7 +498,9 @@ def detect_all(
     configured = settings or Settings()
     findings: list[ExceptionDetection] = []
     for rule in RULES:
-        findings.extend(rule(session, instant, configured))
+        findings.extend(
+            rule(session, instant, configured, dataset_version_id=dataset_version_id)
+        )
     return tuple(findings)
 
 

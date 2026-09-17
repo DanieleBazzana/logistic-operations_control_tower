@@ -17,6 +17,7 @@ from control_tower.exceptions.lifecycle import transition_exception
 from control_tower.exceptions.service import ExceptionService
 from control_tower.ingestion.loader import ingest
 from control_tower.models import ExceptionRecord
+from control_tower.replacement.service import active_dataset_version_id
 from control_tower.synthetic.generator import generate
 
 
@@ -27,7 +28,9 @@ def _as_of(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
+def _seed_lifecycle_sample(
+    session, *, changed_at: datetime, dataset_version_id: int | None = None
+) -> None:
     """Seed one deterministic lifecycle representative for each mapped type."""
 
     lifecycle_paths = {
@@ -43,10 +46,11 @@ def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
         ),
         ExceptionType.SHIPMENT_DELAY: (ExceptionStatus.DISMISSED,),
     }
+    statement = select(ExceptionRecord).where(ExceptionRecord.exception_type.in_(lifecycle_paths))
+    if dataset_version_id is not None:
+        statement = statement.where(ExceptionRecord.dataset_version_id == dataset_version_id)
     records = session.scalars(
-        select(ExceptionRecord)
-        .where(ExceptionRecord.exception_type.in_(lifecycle_paths))
-        .order_by(
+        statement.order_by(
             ExceptionRecord.exception_type,
             ExceptionRecord.issue_key,
             ExceptionRecord.entity_type,
@@ -72,6 +76,7 @@ def _seed_lifecycle_sample(session, *, changed_at: datetime) -> None:
                 if target in (ExceptionStatus.RESOLVED, ExceptionStatus.DISMISSED)
                 else None,
                 changed_at=changed_at,
+                dataset_version_id=dataset_version_id,
             )
 
 
@@ -90,8 +95,13 @@ def bootstrap(
     engine = create_db_engine(configured)
     try:
         with create_session_factory(engine=engine)() as session:
-            detection = ExceptionService(session, configured).detect(as_of)
-            _seed_lifecycle_sample(session, changed_at=as_of)
+            dataset_version_id = active_dataset_version_id(session)
+            detection = ExceptionService(session, configured).detect(
+                as_of, dataset_version_id=dataset_version_id
+            )
+            _seed_lifecycle_sample(
+                session, changed_at=as_of, dataset_version_id=dataset_version_id
+            )
             session.commit()
     finally:
         engine.dispose()

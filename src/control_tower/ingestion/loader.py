@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,9 @@ from control_tower.models import (
     Shipment,
     Supplier,
     Warehouse,
+    explicit_dataset_scope,
 )
+from control_tower.replacement.service import ensure_dataset_version, validate_dataset
 from control_tower.synthetic.artifacts import manifest_identity
 
 ORDER = (
@@ -73,6 +76,21 @@ def _value(value: Any) -> Any:
     return value
 
 
+def _scoped_select(model: type[Any], dataset_version_id: int):
+    return select(model).where(model.dataset_version_id == dataset_version_id)
+
+
+def _bundle_content_hash(bundle: Any) -> str:
+    digest = hashlib.sha256()
+    for artifact in sorted(bundle.rows):
+        digest.update(artifact.encode("utf-8"))
+        digest.update(b"\0")
+        path = bundle.root / artifact
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _relation_fields(artifact: str) -> dict[str, tuple[str, str]]:
     return {
         source_field: (source_field.removeprefix("source_"), field_spec.relation)
@@ -100,8 +118,16 @@ def _fields_for(model: type[Any]) -> tuple[str, ...]:
     return tuple(column.name for column in model.__table__.columns if column.name not in ignored)
 
 
-def _row_to_model(artifact: str, row: dict[str, Any], ids: dict[str, dict[str, int]]) -> Any:
+def _row_to_model(
+    artifact: str,
+    row: dict[str, Any],
+    ids: dict[str, dict[str, int]],
+    dataset_version_id: int,
+) -> Any:
+    if dataset_version_id is None:
+        raise ValueError("dataset_version_id is required for candidate/replacement writes")
     values = dict(row)
+    values["dataset_version_id"] = dataset_version_id
     relation_fields = _relation_fields(artifact)
     for source_field, (db_field, collection) in relation_fields.items():
         if source_field in values:
@@ -175,13 +201,17 @@ def _preflight(
     session: Session,
     results: dict[str, Any],
     summaries: dict[str, SourceSummary],
+    dataset_version_id: int,
 ) -> list[Rejection]:
     conflicts: list[Rejection] = []
     for artifact in ORDER:
         if artifact not in results or artifact == "wms/inventory.csv":
             continue
         model, source_field = MODEL_BY_ARTIFACT[artifact]
-        existing = {getattr(obj, source_field): obj for obj in session.scalars(select(model)).all()}
+        existing = {
+            getattr(obj, source_field): obj
+            for obj in session.scalars(_scoped_select(model, dataset_version_id)).all()
+        }
         for row in results[artifact].rows:
             current = existing.get(row[source_field])
             if current is not None and not _equal(artifact, row, current):
@@ -199,13 +229,17 @@ def _preflight(
             else:
                 summaries[artifact].inserted += 1
     if "wms/inventory.csv" in results:
-        products = {obj.source_product_id: obj.id for obj in session.scalars(select(Product)).all()}
+        products = {
+            obj.source_product_id: obj.id
+            for obj in session.scalars(_scoped_select(Product, dataset_version_id)).all()
+        }
         warehouses = {
-            obj.source_warehouse_id: obj.id for obj in session.scalars(select(Warehouse)).all()
+            obj.source_warehouse_id: obj.id
+            for obj in session.scalars(_scoped_select(Warehouse, dataset_version_id)).all()
         }
         existing_inventory = {
             (obj.product_id, obj.warehouse_id): obj
-            for obj in session.scalars(select(Inventory)).all()
+            for obj in session.scalars(_scoped_select(Inventory, dataset_version_id)).all()
         }
         for row in results["wms/inventory.csv"].rows:
             key = (
@@ -242,7 +276,14 @@ def _preflight(
     return conflicts
 
 
-def _apply(session: Session, results: dict[str, Any], summaries: dict[str, SourceSummary]) -> None:
+def _apply(
+    session: Session,
+    results: dict[str, Any],
+    summaries: dict[str, SourceSummary],
+    dataset_version_id: int,
+) -> None:
+    if dataset_version_id is None:
+        raise ValueError("dataset_version_id is required for candidate/replacement writes")
     ids: dict[str, dict[str, int]] = {
         "products": {},
         "warehouses": {},
@@ -258,10 +299,13 @@ def _apply(session: Session, results: dict[str, Any], summaries: dict[str, Sourc
         if artifact not in results:
             continue
         model, source_field = MODEL_BY_ARTIFACT[artifact]
-        existing = {getattr(obj, source_field): obj for obj in session.scalars(select(model)).all()}
+        existing = {
+            getattr(obj, source_field): obj
+            for obj in session.scalars(_scoped_select(model, dataset_version_id)).all()
+        }
         for row in results[artifact].rows:
             if row[source_field] not in existing:
-                obj = _row_to_model(artifact, row, ids)
+                obj = _row_to_model(artifact, row, ids, dataset_version_id)
                 session.add(obj)
                 session.flush()
                 existing[row[source_field]] = obj
@@ -273,10 +317,13 @@ def _apply(session: Session, results: dict[str, Any], summaries: dict[str, Sourc
         if artifact not in results:
             continue
         model, source_field = MODEL_BY_ARTIFACT[artifact]
-        existing = {getattr(obj, source_field): obj for obj in session.scalars(select(model)).all()}
+        existing = {
+            getattr(obj, source_field): obj
+            for obj in session.scalars(_scoped_select(model, dataset_version_id)).all()
+        }
         for row in results[artifact].rows:
             if row[source_field] not in existing:
-                obj = _row_to_model(artifact, row, ids)
+                obj = _row_to_model(artifact, row, ids, dataset_version_id)
                 session.add(obj)
                 session.flush()
                 existing[row[source_field]] = obj
@@ -292,23 +339,26 @@ def _apply(session: Session, results: dict[str, Any], summaries: dict[str, Sourc
         }:
             continue
         model, source_field = MODEL_BY_ARTIFACT[artifact]
-        existing = {getattr(obj, source_field): obj for obj in session.scalars(select(model)).all()}
+        existing = {
+            getattr(obj, source_field): obj
+            for obj in session.scalars(_scoped_select(model, dataset_version_id)).all()
+        }
         for row in results[artifact].rows:
             if row[source_field] not in existing:
-                session.add(_row_to_model(artifact, row, ids))
+                session.add(_row_to_model(artifact, row, ids, dataset_version_id))
         session.flush()
     if "wms/inventory.csv" in results:
         product_ids = ids["products"]
         warehouse_ids = ids["warehouses"]
         existing = {
             (obj.product_id, obj.warehouse_id): obj
-            for obj in session.scalars(select(Inventory)).all()
+            for obj in session.scalars(_scoped_select(Inventory, dataset_version_id)).all()
         }
         for row in results["wms/inventory.csv"].rows:
             key = (product_ids[row["source_product_id"]], warehouse_ids[row["source_warehouse_id"]])
             current = existing.get(key)
             if current is None:
-                session.add(_row_to_model("wms/inventory.csv", row, ids))
+                session.add(_row_to_model("wms/inventory.csv", row, ids, dataset_version_id))
             elif row["observed_at"] > _utc(current.observed_at):
                 current.on_hand = row["on_hand"]
                 current.reserved = row["reserved"]
@@ -356,8 +406,22 @@ def ingest(
         raise ValueError("M02 ingestion supports PostgreSQL only")
     session_factory = create_session_factory(engine=configured_engine)
     with session_factory() as session:
-        with session.begin():
-            conflicts = _preflight(session, validation, summary_by_artifact)
+        with explicit_dataset_scope(session), session.begin():
+            candidate = ensure_dataset_version(
+                session,
+                dataset_key=str(manifest.get("dataset_key", "M07.7")),
+                manifest_identity=identity,
+                content_hash=_bundle_content_hash(bundle),
+                seed=int(manifest["seed"]),
+                as_of=as_of,
+                generator_revision=str(
+                    manifest.get("generator_revision", manifest.get("schema_version", "unknown"))
+                ),
+            )
+            dataset_version_id = candidate.id
+            conflicts = _preflight(
+                session, validation, summary_by_artifact, dataset_version_id
+            )
             if conflicts:
                 for conflict in conflicts:
                     summary = summary_by_artifact[conflict.artifact]
@@ -365,10 +429,18 @@ def ingest(
                     summary.conflicted += 1
                     summary.rejection_details.append(conflict)
                 return result
-            _apply(session, validation, summary_by_artifact)
+            _apply(session, validation, summary_by_artifact, dataset_version_id)
+            validate_dataset(session, candidate)
             for artifact, summary in summary_by_artifact.items():
                 model = MODEL_BY_ARTIFACT.get(artifact, (Inventory, ""))[0]
-                summary.final_count = session.scalar(select(func.count()).select_from(model)) or 0
+                summary.final_count = (
+                    session.scalar(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.dataset_version_id == dataset_version_id)
+                    )
+                    or 0
+                )
         result.committed = True
     return result
 

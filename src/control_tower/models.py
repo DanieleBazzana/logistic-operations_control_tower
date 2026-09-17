@@ -1,5 +1,7 @@
 """SQLAlchemy 2.x relational model for the operations control tower."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 
@@ -20,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     func,
+    select,
     text,
 )
 from sqlalchemy import (
@@ -67,12 +70,85 @@ class TimestampMixin:
     )
 
 
-class Product(TimestampMixin, Base):
+class DatasetScopedMixin:
+    """Additive dataset boundary shared by every operational row."""
+
+    dataset_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dataset_versions.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+
+
+DATASET_SCOPE_EXPLICIT_KEY = "dataset_scope_requires_explicit_id"
+
+
+@contextmanager
+def explicit_dataset_scope(session: Session) -> Iterator[None]:
+    """Require dataset IDs for candidate/replacement ORM writes in ``session``."""
+
+    previous = session.info.get(DATASET_SCOPE_EXPLICIT_KEY)
+    session.info[DATASET_SCOPE_EXPLICIT_KEY] = True
+    try:
+        yield
+    finally:
+        if previous is None:
+            session.info.pop(DATASET_SCOPE_EXPLICIT_KEY, None)
+        else:
+            session.info[DATASET_SCOPE_EXPLICIT_KEY] = previous
+
+
+class DatasetVersion(TimestampMixin, Base):
+    """Immutable identity and state for one complete operational dataset."""
+
+    __tablename__ = "dataset_versions"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    dataset_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    identity_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    manifest_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    generator_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('STAGED', 'READY', 'ACTIVE', 'RETIRED')",
+            name="ck_dataset_versions_status",
+        ),
+        UniqueConstraint(
+            "dataset_key", "manifest_identity", "seed", "as_of", "generator_revision",
+            name="uq_dataset_versions_logical_identity",
+        ),
+        Index("ix_dataset_versions_status", "status"),
+    )
+
+
+class DatasetActivation(Base):
+    """Singleton authoritative read pointer; changing it is the activation."""
+
+    __tablename__ = "dataset_activation"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True
+    )
+    active_dataset_version_id: Mapped[int] = mapped_column(
+        ForeignKey("dataset_versions.id", ondelete="RESTRICT"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, server_default=func.now()
+    )
+    active_dataset: Mapped[DatasetVersion] = relationship()
+
+
+class Product(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "products"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_product_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    sku: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    source_product_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    sku: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     unit_price: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
@@ -86,18 +162,28 @@ class Product(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("unit_price >= 0", name="unit_price_non_negative"),
         Index("ix_products_sku", "sku"),
+        UniqueConstraint(
+            "dataset_version_id", "source_product_id", name="uq_products_source_product_id"
+        ),
+        UniqueConstraint("dataset_version_id", "sku", name="uq_products_sku"),
     )
 
 
-class Warehouse(TimestampMixin, Base):
+class Warehouse(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "warehouses"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_warehouse_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    source_warehouse_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     region: Mapped[str] = mapped_column(String(100), nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text("'UTC'"))
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_version_id", "source_warehouse_id", name="uq_warehouses_source_warehouse_id"
+        ),
+        UniqueConstraint("dataset_version_id", "code", name="uq_warehouses_code"),
+    )
 
     inventory: Mapped[list["Inventory"]] = relationship(back_populates="warehouse")
     movements: Mapped[list["InventoryMovement"]] = relationship(back_populates="warehouse")
@@ -106,7 +192,7 @@ class Warehouse(TimestampMixin, Base):
     exceptions: Mapped[list["ExceptionRecord"]] = relationship(back_populates="warehouse")
 
 
-class Inventory(TimestampMixin, Base):
+class Inventory(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "inventory"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -127,18 +213,21 @@ class Inventory(TimestampMixin, Base):
     warehouse: Mapped[Warehouse] = relationship(back_populates="inventory")
 
     __table_args__ = (
-        UniqueConstraint("product_id", "warehouse_id", name="uq_inventory_product_warehouse"),
+        UniqueConstraint(
+            "dataset_version_id", "product_id", "warehouse_id",
+            name="uq_inventory_product_warehouse",
+        ),
         CheckConstraint("on_hand >= 0", name="on_hand_non_negative"),
         CheckConstraint("reserved >= 0", name="reserved_non_negative"),
         Index("ix_inventory_warehouse_product", "warehouse_id", "product_id"),
     )
 
 
-class InventoryMovement(TimestampMixin, Base):
+class InventoryMovement(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "inventory_movements"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_movement_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    source_movement_id: Mapped[str] = mapped_column(String(100), nullable=False)
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
     )
@@ -164,10 +253,15 @@ class InventoryMovement(TimestampMixin, Base):
             "warehouse_id",
             "occurred_at",
         ),
+        UniqueConstraint(
+            "dataset_version_id",
+            "source_movement_id",
+            name="uq_inventory_movements_source_movement_id",
+        ),
     )
 
 
-class SourceOrderIdentity(TimestampMixin, Base):
+class SourceOrderIdentity(DatasetScopedMixin, TimestampMixin, Base):
     """Authoritative identity of an order in one source namespace."""
 
     __tablename__ = "source_order_identities"
@@ -183,12 +277,13 @@ class SourceOrderIdentity(TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "source_namespace", "source_order_id", name="uq_source_order_identity_namespace_order"
+            "dataset_version_id", "source_namespace", "source_order_id",
+            name="uq_source_order_identity_namespace_order"
         ),
     )
 
 
-class Order(TimestampMixin, Base):
+class Order(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(
@@ -230,10 +325,12 @@ class Order(TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "source_namespace", "source_order_id", name="uq_orders_source_namespace_order"
+            "dataset_version_id", "source_namespace", "source_order_id",
+            name="uq_orders_source_namespace_order"
         ),
         UniqueConstraint(
-            "source_namespace", "order_number", name="uq_orders_source_namespace_number"
+            "dataset_version_id", "source_namespace", "order_number",
+            name="uq_orders_source_namespace_number"
         ),
         CheckConstraint("total_amount >= 0", name="total_amount_non_negative"),
         CheckConstraint(
@@ -245,7 +342,7 @@ class Order(TimestampMixin, Base):
     )
 
 
-class OrderObservation(TimestampMixin, Base):
+class OrderObservation(DatasetScopedMixin, TimestampMixin, Base):
     """Internal source observation kept separate from the strict Order projection."""
 
     __tablename__ = "order_observations"
@@ -261,7 +358,7 @@ class OrderObservation(TimestampMixin, Base):
     source_version: Mapped[str | None] = mapped_column(String(100))
     source_row_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     replay_identity: Mapped[list[str | None]] = mapped_column(OBSERVATION_JSON, nullable=False)
-    replay_identity_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    replay_identity_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     source_facts: Mapped[dict[str, object]] = mapped_column(OBSERVATION_JSON, nullable=False)
     order_number: Mapped[str | None] = mapped_column(String(100))
     order_status: Mapped[OrderStatus | None] = mapped_column(
@@ -314,6 +411,10 @@ class OrderObservation(TimestampMixin, Base):
         Index("ix_order_observations_status", "status"),
         Index("ix_order_observations_source_order", "source_namespace", "source_order_id"),
         Index("ix_order_observations_source_version", "source_order_identity_id", "source_version"),
+        UniqueConstraint(
+            "dataset_version_id", "replay_identity_digest",
+            name="uq_order_observations_replay_identity_digest",
+        ),
     )
 
     @property
@@ -401,7 +502,7 @@ def _create_sqlite_observation_guards(target, connection, **kwargs) -> None:
     )
 
 
-class OrderObservationReceipt(TimestampMixin, Base):
+class OrderObservationReceipt(DatasetScopedMixin, TimestampMixin, Base):
     """Provenance receipt: one batch may receive one immutable observation."""
 
     __tablename__ = "order_observation_receipts"
@@ -418,17 +519,18 @@ class OrderObservationReceipt(TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "observation_id", "batch_id", name="uq_order_observation_receipt_observation_batch"
+            "dataset_version_id", "observation_id", "batch_id",
+            name="uq_order_observation_receipt_observation_batch",
         ),
         Index("ix_order_observation_receipts_batch", "batch_id"),
     )
 
 
-class OrderItem(TimestampMixin, Base):
+class OrderItem(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "order_items"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_order_item_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    source_order_item_id: Mapped[str] = mapped_column(String(120), nullable=False)
     order_id: Mapped[int] = mapped_column(
         ForeignKey("orders.id", ondelete="CASCADE"), nullable=False
     )
@@ -445,6 +547,9 @@ class OrderItem(TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint("order_id", "line_number", name="uq_order_items_order_line"),
+        UniqueConstraint(
+            "dataset_version_id", "source_order_item_id", name="uq_order_items_source_order_item_id"
+        ),
         CheckConstraint("ordered_quantity > 0", name="ordered_quantity_positive"),
         CheckConstraint("fulfilled_quantity >= 0", name="fulfilled_quantity_non_negative"),
         CheckConstraint(
@@ -455,25 +560,32 @@ class OrderItem(TimestampMixin, Base):
     )
 
 
-class Supplier(TimestampMixin, Base):
+class Supplier(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "suppliers"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_supplier_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    source_supplier_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     region: Mapped[str] = mapped_column(String(100), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_version_id", "source_supplier_id", name="uq_suppliers_source_supplier_id"
+        ),
+        UniqueConstraint("dataset_version_id", "code", name="uq_suppliers_code"),
+    )
+
     purchase_orders: Mapped[list["PurchaseOrder"]] = relationship(back_populates="supplier")
 
 
-class PurchaseOrder(TimestampMixin, Base):
+class PurchaseOrder(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "purchase_orders"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_purchase_order_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    po_number: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    source_purchase_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    po_number: Mapped[str] = mapped_column(String(100), nullable=False)
     supplier_id: Mapped[int] = mapped_column(
         ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False
     )
@@ -508,16 +620,22 @@ class PurchaseOrder(TimestampMixin, Base):
             name="received_after_ordered",
         ),
         Index("ix_purchase_orders_status_expected_delivery", "status", "expected_delivery_at"),
+        UniqueConstraint(
+            "dataset_version_id",
+            "source_purchase_order_id",
+            name="uq_purchase_orders_source_purchase_order_id",
+        ),
+        UniqueConstraint(
+            "dataset_version_id", "po_number", name="uq_purchase_orders_po_number"
+        ),
     )
 
 
-class PurchaseOrderItem(TimestampMixin, Base):
+class PurchaseOrderItem(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "purchase_order_items"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_purchase_order_item_id: Mapped[str] = mapped_column(
-        String(120), nullable=False, unique=True
-    )
+    source_purchase_order_item_id: Mapped[str] = mapped_column(String(120), nullable=False)
     purchase_order_id: Mapped[int] = mapped_column(
         ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False
     )
@@ -539,19 +657,23 @@ class PurchaseOrderItem(TimestampMixin, Base):
             name="received_quantity_lte_ordered_quantity",
         ),
         CheckConstraint("unit_cost >= 0", name="unit_cost_non_negative"),
+        UniqueConstraint(
+            "dataset_version_id", "source_purchase_order_item_id",
+            name="uq_purchase_order_items_source_purchase_order_item_id",
+        ),
     )
 
 
-class Shipment(TimestampMixin, Base):
+class Shipment(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "shipments"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    source_shipment_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    source_shipment_id: Mapped[str] = mapped_column(String(100), nullable=False)
     order_id: Mapped[int] = mapped_column(
         ForeignKey("orders.id", ondelete="RESTRICT"), nullable=False
     )
     carrier: Mapped[str] = mapped_column(String(100), nullable=False)
-    tracking_id: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
+    tracking_id: Mapped[str] = mapped_column(String(150), nullable=False)
     status: Mapped[ShipmentStatus] = mapped_column(
         domain_enum(ShipmentStatus, "shipment_status"), nullable=False
     )
@@ -567,14 +689,18 @@ class Shipment(TimestampMixin, Base):
             name="delivered_after_shipped",
         ),
         Index("ix_shipments_status_eta", "status", "eta"),
+        UniqueConstraint(
+            "dataset_version_id", "source_shipment_id", name="uq_shipments_source_shipment_id"
+        ),
+        UniqueConstraint("dataset_version_id", "tracking_id", name="uq_shipments_tracking_id"),
     )
 
 
-class ExceptionRecord(TimestampMixin, Base):
+class ExceptionRecord(DatasetScopedMixin, TimestampMixin, Base):
     __tablename__ = "exceptions"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    deduplication_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    deduplication_key: Mapped[str] = mapped_column(String(255), nullable=False)
     exception_type: Mapped[ExceptionType] = mapped_column(
         domain_enum(ExceptionType, "exception_type"), nullable=False
     )
@@ -616,6 +742,7 @@ class ExceptionRecord(TimestampMixin, Base):
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence_0_1"),
         Index(
             "uq_exceptions_active_type_issue_key",
+            "dataset_version_id",
             "exception_type",
             "issue_key",
             unique=True,
@@ -623,10 +750,13 @@ class ExceptionRecord(TimestampMixin, Base):
         ),
         Index("ix_exceptions_status_detected_at", "status", "detected_at"),
         Index("ix_exceptions_warehouse_status", "warehouse_id", "status"),
+        UniqueConstraint(
+            "dataset_version_id", "deduplication_key", name="uq_exceptions_deduplication_key"
+        ),
     )
 
 
-class ExceptionHistory(Base):
+class ExceptionHistory(DatasetScopedMixin, Base):
     __tablename__ = "exception_history"
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -670,7 +800,47 @@ def _prevent_exception_history_bulk_mutation(orm_execute_state) -> None:
     if target is ExceptionHistory.__table__ or (
         getattr(target, "name", None) == ExceptionHistory.__tablename__
     ):
+        if orm_execute_state.execution_options.get("_m076_metadata_backfill"):
+            return
         raise ValueError("exception_history is append-only")
+
+
+def _active_dataset_id_for_flush(session: Session) -> int | None:
+    """Read the active pointer without triggering a nested ORM flush."""
+
+    pending_activation = next(
+        (
+            item
+            for item in (*session.new, *session.dirty)
+            if isinstance(item, DatasetActivation)
+            and item.id == 1
+            and item.active_dataset_version_id is not None
+        ),
+        None,
+    )
+    if pending_activation is not None:
+        return pending_activation.active_dataset_version_id
+    return session.connection().execute(
+        select(DatasetActivation.active_dataset_version_id).where(DatasetActivation.id == 1)
+    ).scalar_one_or_none()
+
+
+@event.listens_for(Session, "before_flush")
+def _inherit_active_dataset_for_legacy_writes(session: Session, flush_context, instances) -> None:
+    """Scope legacy M07.6 ORM inserts before migrated NOT NULL columns are checked."""
+
+    pending_scoped = [item for item in session.new if isinstance(item, DatasetScopedMixin)]
+    if not pending_scoped:
+        return
+    active_id = _active_dataset_id_for_flush(session)
+    requires_explicit_id = session.info.get(DATASET_SCOPE_EXPLICIT_KEY, False)
+    for item in pending_scoped:
+        if item.dataset_version_id is not None:
+            continue
+        if requires_explicit_id:
+            raise ValueError("dataset_version_id is required for candidate/replacement writes")
+        if active_id is not None:
+            item.dataset_version_id = active_id
 
 
 @event.listens_for(Engine, "before_execute")
@@ -691,6 +861,8 @@ def _prevent_exception_history_legacy_bulk_mutation(
     if target is ExceptionHistory.__table__ or (
         getattr(target, "name", None) == ExceptionHistory.__tablename__
     ):
+        if execution_options.get("_m076_metadata_backfill"):
+            return
         raise ValueError("exception_history is append-only")
 
 
@@ -699,6 +871,9 @@ SupplyChainException = ExceptionRecord
 Exception = ExceptionRecord
 
 __all__ = [
+    "DATASET_SCOPE_EXPLICIT_KEY",
+    "DatasetActivation",
+    "DatasetVersion",
     "Exception",
     "ExceptionHistory",
     "ExceptionRecord",
@@ -716,4 +891,5 @@ __all__ = [
     "SourceOrderIdentity",
     "SupplyChainException",
     "Warehouse",
+    "explicit_dataset_scope",
 ]

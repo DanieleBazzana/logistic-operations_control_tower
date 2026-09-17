@@ -18,13 +18,24 @@ from control_tower.exceptions.contracts import (
 )
 from control_tower.exceptions.rules import detect_all
 from control_tower.exceptions.severity import severity_for_detection
-from control_tower.models import ExceptionHistory, ExceptionRecord
+from control_tower.models import DATASET_SCOPE_EXPLICIT_KEY, ExceptionHistory, ExceptionRecord
+from control_tower.replacement.service import active_dataset_version_id
 
 ACTIVE_STATUSES = (
     ExceptionStatus.OPEN,
     ExceptionStatus.ACKNOWLEDGED,
     ExceptionStatus.IN_PROGRESS,
 )
+
+
+def _resolve_dataset_version_id(session: Session, dataset_version_id: int | None) -> int | None:
+    """Require an explicit dataset in candidate scope, otherwise preserve legacy fallback."""
+
+    if dataset_version_id is None:
+        if session.info.get(DATASET_SCOPE_EXPLICIT_KEY, False):
+            raise ValueError("dataset_version_id is required for candidate/replacement writes")
+        return active_dataset_version_id(session)
+    return dataset_version_id
 
 
 def make_deduplication_key(detection: ExceptionDetection) -> str:
@@ -50,14 +61,24 @@ def _apply_derived_fields(
 
 
 def _persist_one(
-    session: Session, detection: ExceptionDetection, settings: Settings, instant: datetime
+    session: Session,
+    detection: ExceptionDetection,
+    settings: Settings,
+    instant: datetime,
+    dataset_version_id: int | None = None,
 ) -> str:
+    scope = (
+        (ExceptionRecord.dataset_version_id == dataset_version_id,)
+        if dataset_version_id is not None
+        else ()
+    )
     active = session.scalar(
         select(ExceptionRecord)
         .where(
             ExceptionRecord.exception_type == detection.exception_type,
             ExceptionRecord.issue_key == detection.issue_key,
             ExceptionRecord.status.in_(ACTIVE_STATUSES),
+            *scope,
         )
         .with_for_update()
     )
@@ -71,7 +92,7 @@ def _persist_one(
     deduplication_key = make_deduplication_key(detection)
     historical = session.scalar(
         select(ExceptionRecord)
-        .where(ExceptionRecord.deduplication_key == deduplication_key)
+        .where(ExceptionRecord.deduplication_key == deduplication_key, *scope)
         .with_for_update()
     )
     if historical is not None:
@@ -97,12 +118,14 @@ def _persist_one(
         confidence=detection.confidence,
         warehouse_id=detection.warehouse_id,
         product_id=detection.product_id,
+        dataset_version_id=dataset_version_id,
     )
     session.add(record)
     session.flush()
     session.add(
         ExceptionHistory(
             exception_id=record.id,
+            dataset_version_id=record.dataset_version_id,
             from_status=None,
             to_status=ExceptionStatus.OPEN,
             changed_at=instant,
@@ -119,15 +142,20 @@ def persist_detections(
     detections: Iterable[ExceptionDetection],
     as_of: datetime,
     settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> DetectionRunResult:
     """Persist one run in the caller's transaction and return its counters."""
 
     instant = normalize_as_of(as_of)
     configured = settings or Settings()
+    dataset_version_id = _resolve_dataset_version_id(session, dataset_version_id)
     findings = tuple(detections)
     created = updated = skipped = 0
     for detection in findings:
-        result = _persist_one(session, detection, configured, instant)
+        result = _persist_one(
+            session, detection, configured, instant, dataset_version_id
+        )
         if result == "created":
             created += 1
         elif result == "updated":
@@ -144,21 +172,46 @@ class ExceptionService:
         self.session = session
         self.settings = settings or Settings()
 
-    def detect(self, as_of: datetime) -> DetectionRunResult:
+    def detect(
+        self, as_of: datetime, *, dataset_version_id: int | None = None
+    ) -> DetectionRunResult:
         instant = normalize_as_of(as_of)
-        detections = detect_all(self.session, instant, self.settings)
-        return persist_detections(self.session, detections, instant, self.settings)
+        dataset_version_id = _resolve_dataset_version_id(self.session, dataset_version_id)
+        detections = detect_all(
+            self.session,
+            instant,
+            self.settings,
+            dataset_version_id=dataset_version_id,
+        )
+        return persist_detections(
+            self.session,
+            detections,
+            instant,
+            self.settings,
+            dataset_version_id=dataset_version_id,
+        )
 
     run = detect
 
 
 def detect_and_persist(
-    session: Session, as_of: datetime, settings: Settings | None = None
+    session: Session,
+    as_of: datetime,
+    settings: Settings | None = None,
+    *,
+    dataset_version_id: int | None = None,
 ) -> DetectionRunResult:
     """Functional entry point for applications that prefer no service object."""
 
     configured = settings or Settings()
-    return persist_detections(session, detect_all(session, as_of, configured), as_of, configured)
+    dataset_version_id = _resolve_dataset_version_id(session, dataset_version_id)
+    return persist_detections(
+        session,
+        detect_all(session, as_of, configured, dataset_version_id=dataset_version_id),
+        as_of,
+        configured,
+        dataset_version_id=dataset_version_id,
+    )
 
 
 __all__ = [
