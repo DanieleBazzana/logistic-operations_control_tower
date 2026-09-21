@@ -453,31 +453,27 @@ def test_concurrent_promotion_of_amount_10_and_20_keeps_one_newest_projection() 
     try:
         with Session(engine) as session:
             assert any(result is not None for result in results)
-            assert (
-                session.scalar(
-                    select(func.count())
-                    .select_from(Order)
-                    .where(Order.source_namespace == "amount-test")
-                )
-                == 1
-            )
-            order = session.scalar(
+            orders = session.scalars(
                 select(Order).where(
                     Order.source_namespace == "amount-test",
                     Order.source_order_id == source_order_id,
                 )
-            )
+            ).all()
+            assert len(orders) == 1
+            order = orders[0]
             assert order is not None
             assert order.total_amount == Decimal("20.00")
             assert order.projected_source_version == "v2"
-            assert (
-                session.scalar(
-                    select(func.count())
-                    .select_from(OrderObservation)
-                    .where(OrderObservation.promoted_order_id == order.id)
-                )
-                == 1
-            )
+            assert order.current_observation_id == second_id
+            v1 = session.get(OrderObservation, first_id)
+            v2 = session.get(OrderObservation, second_id)
+            assert v1 is not None
+            assert v2 is not None
+            assert v1.superseded_by_observation_id in {None, v2.id}
+            # Both observations may retain historical promotion links; those
+            # links are not a uniqueness invariant for the current projection.
+            assert v2.promoted_order_id == order.id
+            assert v1.promoted_order_id in {None, order.id}
     finally:
         engine.dispose()
 

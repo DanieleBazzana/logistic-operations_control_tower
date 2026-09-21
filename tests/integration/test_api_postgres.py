@@ -20,7 +20,8 @@ from control_tower.db import create_db_engine
 from control_tower.enums import ExceptionSeverity, ExceptionStatus, ExceptionType, OrderStatus
 from control_tower.exceptions.service import ExceptionService
 from control_tower.ingestion.loader import ingest
-from control_tower.models import ExceptionRecord, Order
+from control_tower.models import DatasetVersion, ExceptionRecord, Order
+from control_tower.replacement.service import activate_dataset
 from control_tower.synthetic.generator import generate
 
 AS_OF = datetime(2025, 1, 15, 12, tzinfo=timezone.utc)
@@ -52,6 +53,19 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
         ingestion = ingest(bundle, engine=engine)
         assert ingestion.committed
         with Session(engine) as session:
+            candidate = session.scalar(
+                select(DatasetVersion).where(
+                    DatasetVersion.manifest_identity == ingestion.manifest_identity
+                )
+            )
+            assert candidate is not None
+            assert candidate.status == "READY"
+            activated = activate_dataset(session, candidate)
+            assert activated.id == candidate.id
+            assert activated.status == "ACTIVE"
+            dataset_version_id = activated.id
+            session.commit()
+
             detection = ExceptionService(session, settings).detect(AS_OF)
             session.commit()
             assert {finding.exception_type for finding in detection.detections} == set(
@@ -61,13 +75,14 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
             active_id = session.scalar(
                 select(ExceptionRecord.id)
                 .where(
+                    ExceptionRecord.dataset_version_id == dataset_version_id,
                     ExceptionRecord.status.in_(
                         (
                             ExceptionStatus.OPEN,
                             ExceptionStatus.ACKNOWLEDGED,
                             ExceptionStatus.IN_PROGRESS,
                         )
-                    )
+                    ),
                 )
                 .order_by(ExceptionRecord.id)
             )
@@ -75,7 +90,12 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
 
             expected_orders = (
                 session.scalar(
-                    select(func.count()).select_from(Order).where(Order.ordered_at <= AS_OF)
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.dataset_version_id == dataset_version_id,
+                        Order.ordered_at <= AS_OF,
+                    )
                 )
                 or 0
             )
@@ -83,7 +103,11 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                 session.scalar(
                     select(func.count())
                     .select_from(Order)
-                    .where(Order.ordered_at <= AS_OF, Order.status == OrderStatus.OPEN)
+                    .where(
+                        Order.dataset_version_id == dataset_version_id,
+                        Order.ordered_at <= AS_OF,
+                        Order.status == OrderStatus.OPEN,
+                    )
                 )
                 or 0
             )
@@ -92,6 +116,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(Order)
                     .where(
+                        Order.dataset_version_id == dataset_version_id,
                         Order.ordered_at <= AS_OF,
                         Order.status == OrderStatus.FULFILLED,
                         Order.fulfilled_at <= AS_OF,
@@ -103,7 +128,11 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                 session.scalar(
                     select(func.count())
                     .select_from(Order)
-                    .where(Order.ordered_at <= AS_OF, Order.status == OrderStatus.CANCELLED)
+                    .where(
+                        Order.dataset_version_id == dataset_version_id,
+                        Order.ordered_at <= AS_OF,
+                        Order.status == OrderStatus.CANCELLED,
+                    )
                 )
                 or 0
             )
@@ -112,6 +141,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(Order)
                     .where(
+                        Order.dataset_version_id == dataset_version_id,
                         Order.ordered_at <= AS_OF,
                         Order.status == OrderStatus.FULFILLED,
                         Order.fulfilled_at <= AS_OF,
@@ -125,6 +155,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(ExceptionRecord)
                     .where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (
@@ -142,6 +173,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(ExceptionRecord)
                     .where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (
@@ -160,6 +192,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(ExceptionRecord)
                     .where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (
@@ -178,6 +211,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(ExceptionRecord)
                     .where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (
@@ -196,6 +230,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
                     select(func.count())
                     .select_from(ExceptionRecord)
                     .where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (
@@ -212,6 +247,7 @@ async def test_m04_postgres_http_contract_and_kpis(tmp_path: Path) -> None:
             expected_revenue = (
                 session.scalar(
                     select(func.coalesce(func.sum(ExceptionRecord.revenue_at_risk), 0)).where(
+                        ExceptionRecord.dataset_version_id == dataset_version_id,
                         ExceptionRecord.detected_at <= AS_OF,
                         ExceptionRecord.status.in_(
                             (

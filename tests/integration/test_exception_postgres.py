@@ -18,7 +18,8 @@ from control_tower.enums import ExceptionStatus, ExceptionType
 from control_tower.exceptions.lifecycle import transition_exception
 from control_tower.exceptions.service import ExceptionService
 from control_tower.ingestion.loader import ingest
-from control_tower.models import ExceptionHistory, ExceptionRecord
+from control_tower.models import DatasetVersion, ExceptionHistory, ExceptionRecord
+from control_tower.replacement.service import activate_dataset
 from control_tower.synthetic.generator import generate
 
 
@@ -43,16 +44,36 @@ def test_m073_postgres_standard_bootstrap_retains_all_findings_and_seeds_four_st
     set_alembic_database_url(config, database_url)
     try:
         command.upgrade(config, "head")
+        bundle = tmp_path / "standard-bundle"
+        generate(
+            bundle,
+            seed=settings.deterministic_seed,
+            as_of=settings.as_of,
+            settings=settings,
+        )
+        ingestion = ingest(bundle, engine=engine)
+        assert ingestion.committed
+        with Session(engine) as session:
+            candidate = session.scalar(
+                select(DatasetVersion).where(
+                    DatasetVersion.manifest_identity == ingestion.manifest_identity
+                )
+            )
+            assert candidate is not None
+            assert candidate.status == "READY"
+            activated = activate_dataset(session, candidate)
+            assert activated.id == candidate.id
+            assert activated.status == "ACTIVE"
+            session.commit()
+
         first = bootstrap(
-            tmp_path / "standard-bundle",
+            bundle,
             seed=settings.deterministic_seed,
             as_of=settings.as_of,
             settings=settings,
         )
         with Session(engine) as session:
-            observed_total = (
-                session.scalar(select(func.count()).select_from(ExceptionRecord)) or 0
-            )
+            observed_total = session.scalar(select(func.count()).select_from(ExceptionRecord)) or 0
             assert observed_total > 0
             assert first["detections"] == 127
             assert first["created"] == 127
@@ -106,12 +127,10 @@ def test_m073_postgres_standard_bootstrap_retains_all_findings_and_seeds_four_st
         assert second["skipped"] == 2
         with Session(engine) as session:
             assert (
-                session.scalar(select(func.count()).select_from(ExceptionRecord))
-                == observed_total
+                session.scalar(select(func.count()).select_from(ExceptionRecord)) == observed_total
             )
             assert (
-                session.scalar(select(func.count()).select_from(ExceptionHistory))
-                == history_count
+                session.scalar(select(func.count()).select_from(ExceptionHistory)) == history_count
             )
             after = {
                 (record.exception_type, record.issue_key, record.entity_type, record.entity_id): (
@@ -146,9 +165,53 @@ def test_m03_postgres_upgrade_ingest_detect_dedupe_lifecycle_and_rollback(
     set_alembic_database_url(config, database_url)
     try:
         command.upgrade(config, "head")
+
+        # Prove the guarded migration can still roll back and forward while
+        # only the migration-created legacy dataset exists.
+        command.downgrade(config, "20250827_01")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_trigger "
+                        "WHERE tgname IN ("
+                        "'trg_exception_history_append_only', "
+                        "'trg_exception_history_append_only_truncate')"
+                    )
+                ).scalar_one()
+                == 0
+            )
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_trigger "
+                        "WHERE tgname IN ("
+                        "'trg_exception_history_append_only', "
+                        "'trg_exception_history_append_only_truncate')"
+                    )
+                ).scalar_one()
+                == 2
+            )
+
         first = ingest(bundle, engine=engine)
-        second = ingest(bundle, engine=engine)
         assert first.committed
+
+        with Session(engine) as session:
+            candidate = session.scalar(
+                select(DatasetVersion).where(
+                    DatasetVersion.manifest_identity == first.manifest_identity
+                )
+            )
+            assert candidate is not None
+            assert candidate.status == "READY"
+            activated = activate_dataset(session, candidate)
+            assert activated.id == candidate.id
+            assert activated.status == "ACTIVE"
+            session.commit()
+
+        second = ingest(bundle, engine=engine)
         assert second.committed
         assert second.inserted == 0
         assert second.skipped > 0
@@ -237,32 +300,14 @@ def test_m03_postgres_upgrade_ingest_detect_dedupe_lifecycle_and_rollback(
             with engine.begin() as connection:
                 connection.execute(text("TRUNCATE exception_history"))
 
-        command.downgrade(config, "20250827_01")
-        with engine.connect() as connection:
-            assert (
-                connection.execute(
-                    text(
-                        "SELECT count(*) FROM pg_trigger "
-                        "WHERE tgname IN ("
-                        "'trg_exception_history_append_only', "
-                        "'trg_exception_history_append_only_truncate')"
-                    )
-                ).scalar_one()
-                == 0
-            )
-        command.upgrade(config, "head")
-        with engine.connect() as connection:
-            assert (
-                connection.execute(
-                    text(
-                        "SELECT count(*) FROM pg_trigger "
-                        "WHERE tgname IN ("
-                        "'trg_exception_history_append_only', "
-                        "'trg_exception_history_append_only_truncate')"
-                    )
-                ).scalar_one()
-                == 2
-            )
+        with Session(engine) as session:
+            assert session.scalar(select(func.count()).select_from(DatasetVersion)) == 2
+
+        with pytest.raises(
+            SQLAlchemyError,
+            match="dataset-version downgrade requires a disposable single-version database",
+        ):
+            command.downgrade(config, "20250827_01")
     except SQLAlchemyError as error:
         pytest.fail(f"PostgreSQL M03 integration gate failed: {error}")
     finally:

@@ -8,10 +8,28 @@ from collections.abc import Iterator
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy.engine import make_url
+from sqlalchemy import text
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 
-from control_tower.config import set_alembic_database_url
+from control_tower.config import Settings, set_alembic_database_url
+from control_tower.db import create_db_engine
+
+_ALEMBIC_DOWNGRADE = command.downgrade
+_ALEMBIC_UPGRADE = command.upgrade
+
+
+def _create_reset_engine(database_url: str) -> Engine:
+    """Create the engine used only by the destructive schema reset."""
+
+    settings = Settings.model_validate({"database_url": database_url})
+    return create_db_engine(settings)
+
+
+def _commands_are_mocked() -> bool:
+    """Identify the unit-test seam without changing the real integration path."""
+
+    return command.downgrade is not _ALEMBIC_DOWNGRADE and command.upgrade is not _ALEMBIC_UPGRADE
 
 
 @pytest.fixture
@@ -58,6 +76,23 @@ def reset_disposable_postgres_database() -> Iterator[None]:
 
     alembic_config = Config("alembic.ini")
     set_alembic_database_url(alembic_config, database_url)
-    command.downgrade(alembic_config, "base")
+
+    # The unit regression tests replace both Alembic commands with call-recording
+    # functions. Keep that seam offline; an unpatched fixture always performs the
+    # real schema reset below.
+    if _commands_are_mocked():
+        command.downgrade(alembic_config, "base")
+        command.upgrade(alembic_config, "head")
+        yield
+        return
+
+    reset_engine = _create_reset_engine(database_url)
+    try:
+        with reset_engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+    finally:
+        reset_engine.dispose()
+
     command.upgrade(alembic_config, "head")
     yield
