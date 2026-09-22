@@ -83,24 +83,29 @@ def upgrade() -> None:
         """
     )
     for table in _SCOPED_TABLES:
+        # The M07.6 exception-history rows predate this metadata.  Bypass the
+        # append-only trigger only for this metadata-only UPDATE, in this
+        # transaction, and restore it before normal traffic can resume.
+        if table == "exception_history":
+            op.execute(
+                "ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only"
+            )
+            op.execute(
+                "ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only_truncate"
+            )
         op.execute(
             f"UPDATE {table} SET dataset_version_id = "
             f"(SELECT id FROM dataset_versions WHERE identity_hash = '{_LEGACY_IDENTITY}') "
             "WHERE dataset_version_id IS NULL"
         )
+        if table == "exception_history":
+            op.execute(
+                "ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only"
+            )
+            op.execute(
+                "ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only_truncate"
+            )
 
-    # The M07.6 exception-history rows predate this metadata.  The historical
-    # trigger is bypassed only inside this migration, in one transaction, for the
-    # NULL->dataset assignment; it is immediately restored before normal traffic.
-    op.execute("ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only")
-    op.execute("ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only_truncate")
-    op.execute(
-        f"UPDATE exception_history SET dataset_version_id = "
-        f"(SELECT id FROM dataset_versions WHERE identity_hash = '{_LEGACY_IDENTITY}') "
-        "WHERE dataset_version_id IS NULL"
-    )
-    op.execute("ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only")
-    op.execute("ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only_truncate")
     op.execute("ALTER TABLE exception_history ALTER COLUMN dataset_version_id SET NOT NULL")
     for table in _SCOPED_TABLES:
         if table != "exception_history":
@@ -217,6 +222,8 @@ def downgrade() -> None:
         ("shipments", "uq_shipments_source_shipment_id", ["source_shipment_id"]), ("shipments", "uq_shipments_tracking_id", ["tracking_id"]),
         ("exceptions", "uq_exceptions_deduplication_key", ["deduplication_key"]),
         ("source_order_identities", "uq_source_order_identity_namespace_order", ["source_namespace", "source_order_id"]),
+        ("order_observation_receipts", "uq_order_observation_receipt_observation_batch", ["observation_id", "batch_id"]),
+        ("order_observations", "uq_order_observations_replay_identity_digest", ["replay_identity_digest"]),
     ):
         op.create_unique_constraint(name, table, columns)
 
