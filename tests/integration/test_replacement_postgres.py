@@ -468,7 +468,7 @@ def test_disposable_pg_dump_restore_round_trip(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            restored_engine = create_engine(str(parsed.set(database=restore_database)))
+            restored_engine = create_engine(parsed.set(database=restore_database))
             try:
                 with restored_engine.connect() as connection:
                     revision = connection.execute(
