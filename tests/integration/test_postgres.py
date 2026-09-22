@@ -100,6 +100,7 @@ def test_postgresql_migration_and_health() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("reset_disposable_postgres_database")
 def test_order_observation_migration_upgrade_and_downgrade() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
