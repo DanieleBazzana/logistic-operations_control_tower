@@ -83,28 +83,30 @@ def upgrade() -> None:
         """
     )
     for table in _SCOPED_TABLES:
-        # The M07.6 exception-history rows predate this metadata.  Bypass the
-        # append-only trigger only for this metadata-only UPDATE, in this
-        # transaction, and restore it before normal traffic can resume.
         if table == "exception_history":
-            op.execute(
-                "ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only"
-            )
-            op.execute(
-                "ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only_truncate"
-            )
+            continue
         op.execute(
             f"UPDATE {table} SET dataset_version_id = "
             f"(SELECT id FROM dataset_versions WHERE identity_hash = '{_LEGACY_IDENTITY}') "
             "WHERE dataset_version_id IS NULL"
         )
-        if table == "exception_history":
-            op.execute(
-                "ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only"
-            )
-            op.execute(
-                "ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only_truncate"
-            )
+
+    # The M07.6 exception-history rows predate this metadata.  Bypass the
+    # append-only trigger only for this metadata-only UPDATE, in this
+    # transaction, and restore it before normal traffic can resume.
+    op.execute("ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only")
+    op.execute(
+        "ALTER TABLE exception_history DISABLE TRIGGER trg_exception_history_append_only_truncate"
+    )
+    op.execute(
+        f"UPDATE exception_history SET dataset_version_id = "
+        f"(SELECT id FROM dataset_versions WHERE identity_hash = '{_LEGACY_IDENTITY}') "
+        "WHERE dataset_version_id IS NULL"
+    )
+    op.execute("ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only")
+    op.execute(
+        "ALTER TABLE exception_history ENABLE TRIGGER trg_exception_history_append_only_truncate"
+    )
 
     op.execute("ALTER TABLE exception_history ALTER COLUMN dataset_version_id SET NOT NULL")
     for table in _SCOPED_TABLES:

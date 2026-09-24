@@ -137,11 +137,36 @@ def disposable_database_url() -> Iterator[str]:
     )
     try:
         with admin_engine.connect() as connection:
-            connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+            database_identifier = connection.dialect.identifier_preparer.quote(database_name)
+            connection.execute(text(f"CREATE DATABASE {database_identifier}"))
     finally:
         admin_engine.dispose()
 
-    yield target_url.render_as_string(hide_password=False)
+    try:
+        yield target_url.render_as_string(hide_password=False)
+    finally:
+        # Each test disposes its target engine in its own finally block before
+        # this fixture teardown attempts to drop the disposable database.
+        cleanup_engine = create_engine(
+            admin_url,
+            isolation_level="AUTOCOMMIT",
+            pool_pre_ping=True,
+            future=True,
+        )
+        try:
+            with cleanup_engine.connect() as connection:
+                database_identifier = connection.dialect.identifier_preparer.quote(database_name)
+                connection.execute(text(f"DROP DATABASE {database_identifier}"))
+                remaining = connection.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :database_name"),
+                    {"database_name": database_name},
+                ).scalar()
+                if remaining is not None:
+                    raise AssertionError(
+                        f"disposable database {database_name!r} still exists after teardown"
+                    )
+        finally:
+            cleanup_engine.dispose()
 
 
 def _migration_state(connection: Connection) -> tuple[object, ...]:
