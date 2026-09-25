@@ -407,3 +407,11 @@ async def test_health_reports_database_failure_without_leaking_details():
 
     assert response.status_code == 503
     assert response.json() == {"detail": "database unavailable"}
+
+
+def test_openapi_documents_read_only_status_patch_response(api_client):
+    schema = api_client._transport.app.openapi()
+    operation = schema["paths"]["/api/v1/exceptions/{exception_id}/status"]["patch"]
+
+    assert "403" in operation["responses"]
+    assert "read-only" in operation["responses"]["403"]["description"].lower()

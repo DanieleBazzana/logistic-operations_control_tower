@@ -43,23 +43,52 @@ credential_assignment = re.compile(
     r"\s*[:=]\s*[\"']?([^\s\"'`,;)}]+)"
 )
 authenticated_url = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]{8,})@")
-placeholder_markers = (
-    "synthetic",
-    "placeholder",
-    "example",
-    "changeme",
+known_synthetic_placeholders = {
     "change-me",
-    "replace",
-    "your_",
-    "your-",
+    "changeme",
     "dummy",
+    "example",
     "fixture",
-    "test-secret",
     "not-a-secret",
+    "placeholder",
     "redacted",
-    "control_tower",
-    "localhost",
-)
+    "replace-me",
+    "synthetic-local-password",
+    "synthetic-release-password",
+    "test-secret",
+    "your-password",
+    "your-secret",
+    "your_token",
+}
+path_specific_placeholders = {
+    ".env.example": {
+        "replace-with-a-local-password",
+        "postgresql+psycopg://" + "control_tower:replace-with-a-local-password@localhost:5432/control_tower_test",
+    },
+    ".github/workflows/ci.yml": {
+        "ci-synthetic-password",
+        "postgresql+psycopg://" + "control_tower:ci-synthetic-password@127.0.0.1:5432/control_tower_test",
+    },
+    "docs/operations.md": {
+        "synthetic-backup-password",
+        "postgresql+psycopg://" + "control_tower:synthetic-backup-password@127.0.0.1:5432/control_tower_test",
+    },
+    "tests/unit/test_config.py": {
+        "override",
+        "p@ss:#%/word",
+    },
+    "tests/unit/test_db.py": {"password"},
+    "tests/unit/test_m07_production.py": {"synthetic-secret"},
+    "tests/unit/test_m07_scripts.py": {
+        "synthetic-but-not-allowlisted-credential-value",
+    },
+}
+
+def is_known_placeholder(relative: str, value: str) -> bool:
+    return (
+        value in known_synthetic_placeholders
+        or value in path_specific_placeholders.get(relative, set())
+    )
 secret_filenames = {
     ".env",
     ".env.local",
@@ -87,8 +116,6 @@ for raw_path in paths:
         if relative in tracked_paths:
             findings.append((relative, 1, "forbidden secret-bearing filename"))
         continue
-    if relative.startswith("tests/") or relative.startswith("tests/fixtures/") or "/fixtures/" in relative:
-        continue
     path = root / relative
     if not path.is_file():
         continue
@@ -105,14 +132,14 @@ for raw_path in paths:
             value = match.group(1).lower()
             if (
                 len(value) >= 12
-                and not any(marker in value for marker in placeholder_markers)
+                and not is_known_placeholder(relative, value)
                 and not any(character in value for character in "${}")
             ):
                 findings.append((relative, line_number, "credential assignment"))
                 break
         if authenticated_url.search(line):
             value = authenticated_url.search(line).group(1).lower()
-            if not any(marker in value for marker in placeholder_markers):
+            if not is_known_placeholder(relative, value):
                 findings.append((relative, line_number, "credential-bearing URL"))
 
 if findings:
@@ -122,6 +149,16 @@ if findings:
 
 print(f"tracked-text secret scan passed: {checked} text files checked")
 PY
+
+command -v docker >/dev/null 2>&1 || fail "docker is required"
+docker run --rm \
+    --mount="type=bind,source=${ROOT_DIR},target=/repo,readonly" \
+    --workdir /repo \
+    zricethezav/gitleaks:v8.24.2 detect \
+    --source=/repo \
+    --log-opts=--all \
+    --redact=100 \
+    || fail "historical secret scan failed"
 
 if command -v pip-audit >/dev/null 2>&1; then
     pip-audit --local

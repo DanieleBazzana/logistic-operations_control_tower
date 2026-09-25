@@ -140,6 +140,11 @@ def test_dashboard_defines_all_eight_charter_kpis():
     ]
 
 
+def test_exception_kpi_is_labeled_active_exceptions_without_changing_wire_key():
+    assert ("open_exceptions", "Active exceptions", "count") in KPI_DEFINITIONS
+    assert not any(key == "active_exceptions" for key, _label, _format in KPI_DEFINITIONS)
+
+
 def test_supplier_filter_only_applies_to_purchase_order_context():
     exception_filters = build_exception_filters(
         exception_types=["SUPPLIER_DELAY"],

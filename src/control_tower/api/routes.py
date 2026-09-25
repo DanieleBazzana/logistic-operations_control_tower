@@ -409,7 +409,11 @@ def exception_detail(exception_id: int, session: SessionDependency) -> Exception
     return _exception_out(row, include_history=True)
 
 
-@router.patch("/exceptions/{exception_id}/status", response_model=ExceptionOut)
+@router.patch(
+    "/exceptions/{exception_id}/status",
+    response_model=ExceptionOut,
+    responses={403: {"description": "Forbidden: public demo is read-only"}},
+)
 def exception_status(
     exception_id: int,
     payload: ExceptionStatusPatch,

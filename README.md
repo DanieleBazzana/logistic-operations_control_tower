@@ -191,6 +191,8 @@ The KPI response includes the eight operational dashboard fields:
 `shipment_delays` (as well as supporting order counts). Its optional timezone-aware
 `as_of` is normalized and echoed. Revenue at risk is a finding-level sum, so an
 order in multiple findings may contribute more than once.
+The `Active exceptions` display KPI retains the API field `open_exceptions` and
+counts findings in `OPEN`, `ACKNOWLEDGED`, or `IN_PROGRESS` status.
 
 ### Dashboard
 

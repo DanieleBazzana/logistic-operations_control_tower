@@ -1,4 +1,23 @@
-# M01-M06 architecture
+# Current architecture and historical M01-M06 record
+
+## Current dataset and operational boundary
+
+The current observation flow is source observation -> normalized observation ->
+capability assessment -> operational promotion. Dataset versions move through
+`STAGED` -> `READY`; an atomic `DatasetActivation` pointer change makes exactly
+one version `ACTIVE`. Queries are dataset-scoped, and staged or otherwise
+preactivation data is invisible to operational reads (preactivation invisibility).
+The previously active version is retained as `RETIRED` for logical rollback rather
+than being deleted.
+Activation is atomic, so readers see the old or new active version, never a
+partially promoted dataset.
+
+The existing Neon recovery branch is secondary disaster recovery, not a source of
+routine traffic or an alternative write target. The public product boundary remains
+read-only; its API rejects lifecycle PATCH requests and exposes public GET routes.
+
+The M01-M06 sections below are the historical architecture record for those
+milestones; they do not describe the newer dataset-version activation lifecycle.
 
 ## System purpose
 

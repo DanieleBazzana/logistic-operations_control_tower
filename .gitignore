@@ -1,5 +1,7 @@
 # Local configuration and environments
 .env
+.env.*
+!.env.example
 .venv/
 
 # Python caches and test/lint output

@@ -19,7 +19,7 @@ from control_tower.dashboard.client import DashboardAPIError, DashboardClient
 KPI_DEFINITIONS = (
     ("orders_processed", "Orders processed", "count"),
     ("sla_performance_pct", "SLA performance", "percent"),
-    ("open_exceptions", "Open exceptions", "count"),
+    ("open_exceptions", "Active exceptions", "count"),
     ("critical_exceptions", "Critical exceptions", "count"),
     ("revenue_at_risk", "Revenue at risk", "money"),
     ("stockout_risks", "Stockout risks", "count"),
