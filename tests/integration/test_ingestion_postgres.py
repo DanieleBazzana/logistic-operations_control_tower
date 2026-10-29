@@ -30,7 +30,26 @@ def test_generated_bundle_ingests_idempotently_in_postgres(tmp_path: Path) -> No
         assert second.committed
         assert second.inserted == 0
         assert second.skipped > 0
+        assert not first.activated
+        assert first.dataset_version_id == second.dataset_version_id
         with engine.connect() as connection:
             assert connection.execute(text("SELECT count(*) FROM products")).scalar_one() == 8
+            status = connection.execute(
+                text("SELECT status FROM dataset_versions WHERE id = :id"),
+                {"id": first.dataset_version_id},
+            ).scalar_one()
+            assert status == "READY"
+
+        activated = ingest(bundle, engine=engine, activate=True)
+        assert activated.committed and activated.activated
+        assert activated.dataset_version_id == first.dataset_version_id
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT active_dataset_version_id FROM dataset_activation WHERE id = 1")
+            ).scalar_one() == first.dataset_version_id
+            assert connection.execute(
+                text("SELECT status FROM dataset_versions WHERE id = :id"),
+                {"id": first.dataset_version_id},
+            ).scalar_one() == "ACTIVE"
     finally:
         engine.dispose()

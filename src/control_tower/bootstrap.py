@@ -91,7 +91,7 @@ def bootstrap(
 
     configured = settings or Settings(as_of=as_of, deterministic_seed=seed)
     generate(output_dir, seed=seed, as_of=as_of, settings=configured)
-    ingestion = ingest(output_dir, settings=configured)
+    ingestion = ingest(output_dir, settings=configured, activate=True)
     engine = create_db_engine(configured)
     try:
         with create_session_factory(engine=engine)() as session:

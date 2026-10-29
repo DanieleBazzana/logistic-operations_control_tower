@@ -278,11 +278,11 @@ def test_staged_candidate_is_invisible_until_activation_and_can_roll_back(
     assert active is not None
     assert active.id == legacy.id
     active_legacy = db_session.get(DatasetVersion, legacy.id)
-    retired_candidate = db_session.get(DatasetVersion, candidate.id)
+    rolled_back_candidate = db_session.get(DatasetVersion, candidate.id)
     assert active_legacy is not None
-    assert retired_candidate is not None
+    assert rolled_back_candidate is not None
     assert active_legacy.status == "ACTIVE"
-    assert retired_candidate.status == "RETIRED"
+    assert rolled_back_candidate.status == "READY"
 
 
 @pytest.mark.integration

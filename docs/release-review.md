@@ -138,7 +138,7 @@ docker compose up -d postgres
   --output-dir /tmp/control-tower-demo-bundle \
   --seed 20250301 --as-of 2025-01-15T12:00:00Z
 .venv/bin/python -m control_tower.ingestion ingest \
-  --input-dir /tmp/control-tower-demo-bundle
+  --input-dir /tmp/control-tower-demo-bundle --activate
 .venv/bin/python -m control_tower.exceptions \
   --as-of 2025-01-15T12:00:00Z
 ```

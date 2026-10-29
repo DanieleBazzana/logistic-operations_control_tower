@@ -36,7 +36,11 @@ from control_tower.models import (
     Warehouse,
     explicit_dataset_scope,
 )
-from control_tower.replacement.service import ensure_dataset_version, validate_dataset
+from control_tower.replacement.service import (
+    activate_dataset,
+    ensure_dataset_version,
+    validate_dataset,
+)
 from control_tower.synthetic.artifacts import manifest_identity
 
 ORDER = (
@@ -371,8 +375,13 @@ def ingest(
     *,
     settings: Settings | None = None,
     engine: Engine | None = None,
+    activate: bool = False,
 ) -> IngestionResult:
-    """Validate then atomically ingest a generated bundle into PostgreSQL."""
+    """Validate then atomically ingest a generated bundle into PostgreSQL.
+
+    The dataset is left READY (invisible to operational reads) unless ``activate``
+    is true, in which case the read pointer moves to it in the same transaction.
+    """
 
     bundle = read_bundle(input_dir)
     validation = validate_bundle_rows(
@@ -431,6 +440,8 @@ def ingest(
                 return result
             _apply(session, validation, summary_by_artifact, dataset_version_id)
             validate_dataset(session, candidate)
+            if activate:
+                activate_dataset(session, candidate)
             for artifact, summary in summary_by_artifact.items():
                 model = MODEL_BY_ARTIFACT.get(artifact, (Inventory, ""))[0]
                 summary.final_count = (
@@ -442,6 +453,8 @@ def ingest(
                     or 0
                 )
         result.committed = True
+        result.dataset_version_id = dataset_version_id
+        result.activated = activate
     return result
 
 
@@ -449,12 +462,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ingest a deterministic M02 bundle")
     parser.add_argument("ingest", nargs="?", help="compatibility subcommand")
     parser.add_argument("--input-dir", default="data/generated")
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="make the ingested dataset the active read dataset in the same transaction",
+    )
     args = parser.parse_args(argv)
-    result = ingest(args.input_dir)
+    result = ingest(args.input_dir, activate=args.activate)
     print(
         json.dumps(
             {
                 "committed": result.committed,
+                "dataset_version_id": result.dataset_version_id,
+                "activated": result.activated,
                 "summaries": [summary.as_dict() for summary in result.summaries],
             },
             default=str,

@@ -17,12 +17,14 @@ from control_tower.replacement.service import (
     LEGACY_AS_OF,
     LEGACY_SEED,
     DatasetIdentityConflict,
+    DatasetLifecycleError,
     activate_dataset,
     backfill_m076,
     dataset_identity,
     ensure_dataset_version,
     get_active_dataset_version,
     rollback_dataset,
+    validate_dataset,
 )
 
 
@@ -119,7 +121,7 @@ def test_backfill_is_non_destructive_and_activation_is_pointer_only() -> None:
         assert session.get(DatasetVersion, legacy.id).status == "RETIRED"
         rollback_dataset(session, candidate.id)
         assert get_active_dataset_version(session).id == legacy.id
-        assert session.get(DatasetVersion, candidate.id).status == "RETIRED"
+        assert session.get(DatasetVersion, candidate.id).status == "READY"
 
 
 def test_as_of_contract_is_fixed() -> None:
@@ -267,3 +269,36 @@ def test_exception_detection_and_persistence_use_active_or_explicit_dataset(
                 LEGACY_AS_OF, dataset_version_id=2
             )
         assert calls == [("detect", 2), ("persist", 2)]
+
+
+def _ready_dataset(session: Session, key: str) -> DatasetVersion:
+    dataset = ensure_dataset_version(
+        session,
+        dataset_key=key,
+        manifest_identity=f"manifest-{key}",
+        content_hash=f"content-{key}",
+        seed=LEGACY_SEED,
+        as_of=LEGACY_AS_OF,
+        generator_revision="generator-r2",
+    )
+    validate_dataset(session, dataset)
+    return dataset
+
+
+def test_repeated_rollbacks_walk_back_through_activation_history() -> None:
+    with _session() as session:
+        first, second, third = (_ready_dataset(session, key) for key in ("A", "B", "C"))
+        # Activation order deliberately differs from creation order.
+        for dataset in (third, first, second):
+            activate_dataset(session, dataset)
+
+        assert rollback_dataset(session).id == first.id
+        assert session.get(DatasetVersion, second.id).status == "READY"
+        assert rollback_dataset(session).id == third.id
+        assert session.get(DatasetVersion, first.id).status == "READY"
+        with pytest.raises(DatasetLifecycleError):
+            rollback_dataset(session)
+
+        assert activate_dataset(session, second).status == "ACTIVE"
+        assert get_active_dataset_version(session).id == second.id
+        assert session.get(DatasetVersion, third.id).status == "RETIRED"

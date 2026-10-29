@@ -8,7 +8,9 @@ capability assessment -> operational promotion. Dataset versions move through
 one version `ACTIVE`. Queries are dataset-scoped, and staged or otherwise
 preactivation data is invisible to operational reads (preactivation invisibility).
 The previously active version is retained as `RETIRED` for logical rollback rather
-than being deleted.
+than being deleted. Rollback reactivates the most recently retired version and returns
+the rolled-back version to `READY`, so repeated rollbacks walk back through activation
+history and the rolled-back version can still be re-activated explicitly.
 Activation is atomic, so readers see the old or new active version, never a
 partially promoted dataset.
 

@@ -222,3 +222,51 @@ def test_dashboard_hides_lifecycle_controls_for_public_demo(monkeypatch):
 @pytest.fixture
 def no_dashboard_public_flag(monkeypatch):
     monkeypatch.delenv("PUBLIC_DEMO_READ_ONLY", raising=False)
+
+
+def test_bootstrap_activates_the_ingested_dataset_before_detection(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+
+    from control_tower import bootstrap as bootstrap_module
+
+    calls: dict[str, object] = {}
+
+    class _StopAfterIngest(Exception):
+        pass
+
+    def fake_ingest(output_dir, **kwargs):
+        calls.update(kwargs)
+        raise _StopAfterIngest
+
+    monkeypatch.setattr(bootstrap_module, "generate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bootstrap_module, "ingest", fake_ingest)
+
+    with pytest.raises(_StopAfterIngest):
+        bootstrap_module.bootstrap(
+            tmp_path,
+            seed=1,
+            as_of=datetime(2025, 1, 15, 12, tzinfo=timezone.utc),
+            settings=Settings(),
+        )
+    assert calls["activate"] is True
+
+
+def test_ingestion_cli_exposes_explicit_activation(monkeypatch, capsys):
+    from control_tower.ingestion import loader
+    from control_tower.ingestion.contracts import IngestionResult
+
+    seen: dict[str, object] = {}
+
+    def fake_ingest(input_dir, **kwargs):
+        seen.update(kwargs)
+        return IngestionResult("identity", 1, None, [], True, {}, 7, kwargs["activate"])
+
+    monkeypatch.setattr(loader, "ingest", fake_ingest)
+
+    assert loader.main(["ingest", "--input-dir", "bundle", "--activate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert seen == {"activate": True}
+    assert payload["activated"] is True
+    assert payload["dataset_version_id"] == 7
+    assert loader.main(["ingest", "--input-dir", "bundle"]) == 0
+    assert seen == {"activate": False}

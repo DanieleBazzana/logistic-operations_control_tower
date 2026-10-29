@@ -235,7 +235,13 @@ def activate_dataset(session: Session, dataset: DatasetVersion | int) -> Dataset
 def rollback_dataset(
     session: Session, dataset: DatasetVersion | int | None = None
 ) -> DatasetVersion:
-    """Move the pointer back to the most recent retired dataset."""
+    """Move the pointer back to the most recently retired dataset.
+
+    Retired rows only change when they are retired, so ``updated_at`` orders them
+    as an activation stack. The rolled-back dataset returns to READY rather than
+    RETIRED: it stays re-activatable but is never picked by a later rollback, so
+    repeated rollbacks keep walking back through history.
+    """
 
     _advisory_lock(session)
     pointer = session.scalar(
@@ -253,12 +259,13 @@ def rollback_dataset(
     previous = session.scalar(
         select(DatasetVersion)
         .where(DatasetVersion.status == "RETIRED", DatasetVersion.id != current.id)
-        .order_by(DatasetVersion.created_at.desc(), DatasetVersion.id.desc())
+        .order_by(DatasetVersion.updated_at.desc(), DatasetVersion.id.desc())
+        .limit(1)
         .with_for_update()
     )
     if previous is None:
         raise DatasetLifecycleError("no retired dataset is available for rollback")
-    current.status = "RETIRED"
+    current.status = "READY"
     previous.status = "ACTIVE"
     pointer.active_dataset_version_id = previous.id
     session.flush()

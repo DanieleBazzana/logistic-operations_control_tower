@@ -65,6 +65,8 @@ class IngestionResult:
     summaries: list[SourceSummary]
     committed: bool
     manifest: dict[str, Any]
+    dataset_version_id: int | None = None
+    activated: bool = False
 
     @property
     def rejected(self) -> int:

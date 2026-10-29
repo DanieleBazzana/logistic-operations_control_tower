@@ -116,9 +116,9 @@ while IFS= read -r artifact; do
         || fail "artifact generation is not byte-for-byte deterministic: $artifact"
 done < <(cd "$BUNDLE_ONE" && find . -type f -name '*.csv' | sort)
 
-"$PYTHON" -m control_tower.ingestion ingest --input-dir "$BUNDLE_ONE" \
+"$PYTHON" -m control_tower.ingestion ingest --input-dir "$BUNDLE_ONE" --activate \
     >"$RUN_DIR/ingest-one.json" 2>&1 || fail "initial ingestion failed"
-"$PYTHON" -m control_tower.ingestion ingest --input-dir "$BUNDLE_ONE" \
+"$PYTHON" -m control_tower.ingestion ingest --input-dir "$BUNDLE_ONE" --activate \
     >"$RUN_DIR/ingest-two.json" 2>&1 || fail "idempotent re-ingestion failed"
 
 "$PYTHON" -c '
@@ -129,8 +129,10 @@ for path in sys.argv[1:]:
         payload = json.load(handle)
     if payload.get("committed") is not True:
         raise SystemExit(f"ingestion did not commit: {path}")
+    if payload.get("activated") is not True:
+        raise SystemExit(f"ingestion did not activate its dataset: {path}")
 ' "$RUN_DIR/ingest-one.json" "$RUN_DIR/ingest-two.json" \
-    || fail "ingestion result did not confirm a committed transaction"
+    || fail "ingestion result did not confirm a committed, activated dataset"
 
 "$PYTHON" -m control_tower.exceptions --as-of "$AS_OF" \
     >"$RUN_DIR/detection-one.json" 2>&1 || fail "initial exception detection failed"

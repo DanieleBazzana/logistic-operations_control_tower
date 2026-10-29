@@ -82,14 +82,25 @@ def _persist_one(
         )
         .with_for_update()
     )
+    deduplication_key = make_deduplication_key(detection)
     if active is not None:
         # A recurring active issue refreshes explainability/derived metrics, but
         # never changes lifecycle state or creates audit noise.
         _apply_derived_fields(active, detection, settings, instant)
+        # Track the latest source facts so that resolving after a fact change
+        # suppresses those facts. If a terminal record already owns this key, it
+        # suppresses them instead and the active key is left unchanged.
+        if active.deduplication_key != deduplication_key:
+            owner = session.scalar(
+                select(ExceptionRecord.id).where(
+                    ExceptionRecord.deduplication_key == deduplication_key, *scope
+                )
+            )
+            if owner is None:
+                active.deduplication_key = deduplication_key
         session.flush()
         return "updated"
 
-    deduplication_key = make_deduplication_key(detection)
     historical = session.scalar(
         select(ExceptionRecord)
         .where(ExceptionRecord.deduplication_key == deduplication_key, *scope)

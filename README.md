@@ -125,8 +125,12 @@ and six ordinary source-data scenarios. It does not create exception rows.
 After `alembic upgrade head`:
 
 ```bash
-.venv/bin/python -m control_tower.ingestion ingest --input-dir data/generated
+.venv/bin/python -m control_tower.ingestion ingest --input-dir data/generated --activate
 ```
+
+Each bundle is loaded into its own dataset version. Without `--activate` it stays
+`READY` and invisible to operational reads; `--activate` moves the active read
+pointer to it in the same transaction (the demo bootstrap always activates).
 
 Ingestion validates all artifacts before opening the write transaction, normalizes
 enums/timestamps/booleans/Decimal values, checks joins and duplicate conflicts,

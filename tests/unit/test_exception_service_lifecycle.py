@@ -335,6 +335,48 @@ def test_resolved_same_fingerprint_is_not_recreated_but_changed_fingerprint_is()
     )
 
 
+def test_resolving_after_active_fact_change_suppresses_the_latest_facts() -> None:
+    session = session_with_fixture()
+    service = ExceptionService(session)
+    service.detect(AS_OF)
+    session.commit()
+    record = session.scalar(
+        select(ExceptionRecord).where(
+            ExceptionRecord.exception_type == ExceptionType.SLA_BREACH_RISK
+        )
+    )
+    order = session.get(Order, 1)
+    assert record is not None and order is not None
+    original_key = record.deduplication_key
+
+    order.promised_at = AS_OF + timedelta(hours=1)
+    session.commit()
+    drifted = service.detect(AS_OF)
+    session.commit()
+    assert drifted.created == 0
+    assert session.get(ExceptionRecord, record.id).deduplication_key != original_key
+
+    for status, reason in (
+        (ExceptionStatus.ACKNOWLEDGED, None),
+        (ExceptionStatus.IN_PROGRESS, None),
+        (ExceptionStatus.RESOLVED, "replanned"),
+    ):
+        transition_exception(
+            session, record.id, status, actor="operator", reason=reason, changed_at=AS_OF
+        )
+    session.commit()
+
+    rerun = service.detect(AS_OF)
+    session.commit()
+    assert rerun.created == 0
+    assert rerun.skipped >= 1
+    assert session.scalar(
+        select(func.count())
+        .select_from(ExceptionRecord)
+        .where(ExceptionRecord.exception_type == ExceptionType.SLA_BREACH_RISK)
+    ) == 1
+
+
 def test_resolved_shortage_ignores_safety_stock_only_configuration_changes() -> None:
     session = session_with_fixture()
     first_service = ExceptionService(
