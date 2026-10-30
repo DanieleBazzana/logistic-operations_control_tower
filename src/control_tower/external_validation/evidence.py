@@ -89,6 +89,7 @@ def build_validation_evidence(
     provenance: Sequence[Mapping[str, Any]] | None = None,
     mappings: Sequence[Any] | None = None,
     manifest_provenance: Mapping[str, Any] | None = None,
+    observation_statuses: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Build JSON-serializable evidence without contacting the API or database."""
 
@@ -146,6 +147,7 @@ def build_validation_evidence(
         "coherence": _coherence(kpis, queue_counts),
         "provenance": list(provenance or []),
         "manifest_provenance": dict(manifest_provenance or {}),
+        "order_observation_statuses": dict(observation_statuses or {}),
         "mappings": [
             mapping if isinstance(mapping, Mapping) else mapping_dict(mapping)
             for mapping in (mappings or [])

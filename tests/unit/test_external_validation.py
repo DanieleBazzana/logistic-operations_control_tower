@@ -519,6 +519,34 @@ def test_validation_evidence_is_structured_and_explicit_about_non_comparability(
     assert "supplier" in evidence["unavailable_domains"]
 
 
+def test_validation_evidence_includes_order_observation_statuses_when_supplied() -> None:
+    evidence = build_validation_evidence(
+        dataset="olist",
+        role="primary",
+        sample_size=2,
+        rows_read={"orders": 2},
+        validated={"oms/orders.csv": {"accepted": 0, "rejected": 2}},
+        unavailable=[],
+        kpis={},
+        queue_counts={},
+        observation_statuses={
+            "SOURCE_VALID": 2,
+            "NORMALIZED": 0,
+            "CONTEXT_INCOMPLETE": 2,
+            "PROMOTED": 0,
+            "REJECTED_INVALID": 0,
+        },
+    )
+
+    assert evidence["order_observation_statuses"] == {
+        "SOURCE_VALID": 2,
+        "NORMALIZED": 0,
+        "CONTEXT_INCOMPLETE": 2,
+        "PROMOTED": 0,
+        "REJECTED_INVALID": 0,
+    }
+
+
 def test_validation_evidence_distinguishes_order_counts_from_rejection_errors() -> None:
     adapted = DataCoAdapter().adapt(
         {
